@@ -1,14 +1,10 @@
 # Sing-Box Hysteria2 & Reality 快速配置脚本
 
-[![作者](https://img.shields.io/badge/作者-jcnf--那坨-blue.svg)](https://ybfl.net)
-[![TG频道](https://img.shields.io/badge/TG频道-@mffjc-宗绿色.svg)](https://t.me/mffjc)
-[![TG交流群](https://img.shields.io/badge/TG交流群-点击加入-yellow.svg)](https://t.me/+TDz0jE2WcAvfgmLi)
-
-一个用于在 Linux 服务器上快速安装、配置和管理 [Sing-Box](https://github.com/SagerNet/sing-box) 的 Shell 脚本，特别针对 Hysteria2 和 VLESS Reality 协议进行了优化。
+一个用于在 Linux 服务器上安装、配置和管理 [Sing-Box](https://github.com/SagerNet/sing-box) 的 Shell 脚本，针对 Hysteria2 和 VLESS Reality 协议进行了优化。
 
 ## 特性
 
-*   **一键安装 Sing-Box (beta 版)**：自动从官方渠道下载并安装最新 beta 版本的 Sing-Box。
+*   **一键安装 Sing-Box (beta 版)**：通过官方安装脚本部署最新 beta 版本（先下载到临时文件再执行，避免 pipe-to-bash）。
 *   **多种安装模式**：
     *   同时安装 Hysteria2 和 Reality (VLESS) 服务，实现共存。
     *   单独安装 Hysteria2 服务。
@@ -16,8 +12,8 @@
 *   **自动化配置**：
     *   Hysteria2: 自动生成自签名证书、随机密码。
     *   Reality (VLESS): 自动生成 UUID、Reality Keypair (私钥和公钥)。
-    *   自动填充生成的凭证到 `config.json` 配置文件。
-    *   用户可自定义监听端口、伪装域名 (SNI) 等关键参数。
+    *   使用 `jq` 安全地构建 `config.json`，避免用户输入导致的 JSON 注入或格式错误。
+    *   用户可自定义监听端口、伪装域名 (SNI) 等关键参数，且输入经过校验。
 *   **Systemd 服务管理**：
     *   自动创建并配置 Sing-Box 的 systemd 服务。
     *   方便地启动、停止、重启、查看服务状态及日志。
@@ -32,9 +28,12 @@
 *   **便捷管理**：
     *   提供菜单式交互界面，操作简单直观。
     *   支持查看和编辑 Sing-Box 配置文件 (使用 `nano`)。
-    *   一键更新 Sing-Box 内核。
-    *   一键卸载 Sing-Box 及相关配置。
-*   **信息持久化**：上次成功安装的配置参数会被保存，方便后续通过菜单再次查看。
+    *   一键更新 Sing-box 内核。
+    *   一键卸载 Sing-box 及相关配置。
+*   **信息持久化**：上次成功安装的配置参数会被保存，方便后续通过菜单再次查看；持久化文件权限设置为 `600`。
+*   **纯净脚本**：
+    *   移除了多余的外部推广链接、Telegram 链接、网站链接。
+    *   IP 检测优先使用本地网络接口，不再请求第三方 IP 探测服务，避免服务器 IP 泄露。
 
 ## 环境要求
 
@@ -47,12 +46,15 @@
 
 ### 1. 下载并运行脚本
 
+建议先下载到本地，检查内容后再执行：
+
 ```bash
-wget -O lvhy.sh https://raw.githubusercontent.com/Netflixxp/vlhy2/main/lvhy.sh && chmod +x lvhy.sh && ./lvhy.sh
-```
-或者
-```bash
-bash <(curl -sSL https://raw.githubusercontent.com/Netflixxp/vlhy2/main/lvhy.sh)
+wget -O lvhy.sh https://raw.githubusercontent.com/Netflixxp/vlhy2/main/lvhy.sh
+# 或
+# curl -fsSL -o lvhy.sh https://raw.githubusercontent.com/Netflixxp/vlhy2/main/lvhy.sh
+
+chmod +x lvhy.sh
+sudo bash lvhy.sh
 ```
 
 ### 2. 再次运行脚本
@@ -65,41 +67,7 @@ sudo bash lvhy.sh
 
 ### 3. 菜单选项说明
 
-脚本启动后，你会看到类似如下的菜单：
-
-```
-================================================
- Sing-Box Hysteria2 & Reality 管理脚本 
-================================================
- 作者:      jcnf-那坨
- 网站:      https://ybfl.net
- TG 频道:   https://t.me/mffjc
- TG 交流群: https://t.me/+TDz0jE2WcAvfgmLi
-================================================
-安装选项:
-  1. 安装 Hysteria2 + Reality (共存)
-  2. 单独安装 Hysteria2
-  3. 单独安装 Reality (VLESS)
-------------------------------------------------
-管理选项:
-  4. 启动 Sing-box 服务
-  5. 停止 Sing-box 服务
-  6. 重启 Sing-box 服务
-  7. 查看 Sing-box 服务状态
-  8. 查看 Sing-box 实时日志
-  9. 查看当前配置文件
-  10. 编辑当前配置文件 (使用 nano)
-  11. 显示上次保存的导入信息 (含二维码)
-------------------------------------------------
-其他选项:
-  12. 更新 Sing-box 内核 (使用官方beta脚本)
-  13. 卸载 Sing-box
-  0. 退出脚本
-================================================
-请输入选项 [0-13]: 
-```
-
-根据提示输入数字选择相应功能即可。
+脚本启动后会显示主菜单，根据提示输入数字选择相应功能即可。
 
 **初次使用建议：**
 
@@ -110,9 +78,9 @@ sudo bash lvhy.sh
 ### 注意事项
 
 *   **配置文件**: Sing-Box 的主配置文件位于 `/usr/local/etc/sing-box/config.json`。Hysteria2 使用的自签名证书位于 `/etc/hysteria/`。
-*   **持久化信息**: 上次成功安装的导入参数会保存在 `/usr/local/etc/sing-box/.last_singbox_script_info` 文件中，以便下次运行时通过菜单查看。卸载时如果选择删除配置目录，此文件也会被删除。
+*   **持久化信息**: 上次成功安装的导入参数会保存在 `/usr/local/etc/sing-box/.last_singbox_script_info` 文件中，权限为 `600`，以便下次运行时通过菜单查看。卸载时如果选择删除配置目录，此文件也会被删除。
 *   **SNI (伪装域名)**:
-    *   对于 Reality，选择一个响应良好且不易被GFW干扰的SNI（如 `www.microsoft.com`, `www.apple.com` 等）非常重要。脚本会让你自定义。
+    *   对于 Reality，选择一个响应良好且不易被 GFW 干扰的 SNI（如 `www.microsoft.com`, `www.apple.com` 等）非常重要。脚本会让你自定义。
     *   对于 Hysteria2 的自签名证书，SNI 主要用于客户端验证，默认使用 `bing.com`，你也可以自定义。
 *   **端口占用**: 请确保你为 Hysteria2 和 Reality 选择的监听端口未被其他程序占用。脚本默认 Hysteria2 使用 `8443`，Reality 使用 `443`。
 *   **防火墙**: 如果你的服务器启用了防火墙 (如 ufw, firewalld)，请确保放行 Sing-Box 使用的端口。
@@ -136,5 +104,5 @@ sudo bash lvhy.sh
 
 ## 致谢
 
-*   [Sing-Box](https://github.com/SagerNet/sing-box) 项目及其开发者。
+*   Sing-Box 项目及其开发者。
 *   所有为开源社区做出贡献的人。

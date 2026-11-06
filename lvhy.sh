@@ -1,12 +1,10 @@
 #!/bin/bash
 
-# Script for Sing-Box Hysteria2 & Reality Management
+# Hardened Sing-Box Hysteria2 & Reality Management Script
+# 安全优先：本地化、输入校验、安全权限、无 pipe-to-bash
 
-# --- Author Information ---
-AUTHOR_NAME="jcnf-那坨"
-WEBSITE_URL="https://ybfl.net"
-TG_CHANNEL_URL="https://t.me/mffjc"
-TG_GROUP_URL="https://t.me/+TDz0jE2WcAvfgmLi"
+set -euo pipefail
+IFS=$' \t\n'
 
 # --- Configuration ---
 SINGBOX_INSTALL_PATH_EXPECTED="/usr/local/bin/sing-box"
@@ -14,23 +12,20 @@ SINGBOX_CONFIG_DIR="/usr/local/etc/sing-box"
 SINGBOX_CONFIG_FILE="${SINGBOX_CONFIG_DIR}/config.json"
 SINGBOX_SERVICE_FILE="/etc/systemd/system/sing-box.service"
 
-HYSTERIA_CERT_DIR="/etc/hysteria" # 针对自签名证书
+HYSTERIA_CERT_DIR="/etc/hysteria"
 HYSTERIA_CERT_KEY="${HYSTERIA_CERT_DIR}/private.key"
 HYSTERIA_CERT_PEM="${HYSTERIA_CERT_DIR}/cert.pem"
 
-# 用于持久存储上次配置信息的文件
 PERSISTENT_INFO_FILE="${SINGBOX_CONFIG_DIR}/.last_singbox_script_info"
 
-# 默认值
+# Defaults
 DEFAULT_HYSTERIA_PORT="8443"
 DEFAULT_REALITY_PORT="443"
 DEFAULT_HYSTERIA_MASQUERADE_CN="bing.com"
 DEFAULT_REALITY_SNI="www.tesla.com"
 
-# 全局 SINGBOX_CMD
 SINGBOX_CMD=""
 
-# 全局变量，用于存储上次生成的配置信息 (将从文件加载)
 LAST_SERVER_IP=""
 LAST_SERVER_IP4=""
 LAST_SERVER_IP6=""
@@ -40,15 +35,15 @@ LAST_HY2_MASQUERADE_CN=""
 LAST_HY2_LINK=""
 LAST_REALITY_PORT=""
 LAST_REALITY_UUID=""
-LAST_REALITY_PUBLIC_KEY="" # 公钥需要显示
+LAST_REALITY_PUBLIC_KEY=""
 LAST_REALITY_SNI=""
-LAST_REALITY_SHORT_ID="0123456789abcdef" # 默认值
-LAST_REALITY_FINGERPRINT="chrome"    # 默认值
+LAST_REALITY_SHORT_ID="0123456789abcdef"
+LAST_REALITY_FINGERPRINT="chrome"
 LAST_VLESS_LINK=""
-LAST_INSTALL_MODE="" # "all", "hysteria2", "reality", 或 ""
-LINK_IP_MODE="4"     # 新增：导入链接 IP 模式：4 / 6 / both
+LAST_INSTALL_MODE=""
+LINK_IP_MODE="4"
 
-# --- 颜色定义 ---
+# --- Colors ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -56,81 +51,148 @@ BLUE='\033[0;34m'
 MAGENTA='\033[0;35m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
-UNDERLINE='\033[4m'
-NC='\033[0m' # 无颜色
+NC='\033[0m'
 
-# --- 辅助函数 ---
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; }
 success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 
-print_author_info() {
+print_header() {
     echo -e "${MAGENTA}${BOLD}================================================${NC}"
     echo -e "${CYAN}${BOLD} Sing-Box Hysteria2 & Reality 管理脚本 ${NC}"
     echo -e "${MAGENTA}${BOLD}================================================${NC}"
-    echo -e " ${YELLOW}作者:${NC}      ${GREEN}${AUTHOR_NAME}${NC}"
-    echo -e " ${YELLOW}网站:${NC}      ${UNDERLINE}${BLUE}${WEBSITE_URL}${NC}"
-    echo -e " ${YELLOW}TG 频道:${NC}   ${UNDERLINE}${BLUE}${TG_CHANNEL_URL}${NC}"
-    echo -e " ${YELLOW}TG 交流群:${NC} ${UNDERLINE}${BLUE}${TG_GROUP_URL}${NC}"
-    echo -e "${MAGENTA}${BOLD}================================================${NC}"
 }
 
-# --- IP 识别与格式化 ---
+# --- Validation helpers ---
 is_public_ipv4() {
     local ip="$1"
-    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    local a="${BASH_REMATCH[1]}" b="${BASH_REMATCH[2]}" c="${BASH_REMATCH[3]}" d="${BASH_REMATCH[4]}"
+    (( a <= 255 && b <= 255 && c <= 255 && d <= 255 )) || return 1
     [[ "$ip" == 10.* || "$ip" == 192.168.* ]] && return 1
     if [[ "$ip" =~ ^172\.([0-9]{1,3})\..* ]]; then
-        local a="${BASH_REMATCH[1]}"
-        (( a>=16 && a<=31 )) && return 1
+        local x="${BASH_REMATCH[1]}"
+        (( x >= 16 && x <= 31 )) && return 1
     fi
-    [[ "$ip" == 127.* || "$ip" == 169.254.* ]] && return 1
+    [[ "$ip" == 127.* || "$ip" == 169.254.* || "$ip" == 0.* || "$ip" == 255.* ]] && return 1
     return 0
 }
+
+is_public_ipv6() {
+    local ip="$1"
+    [[ "$ip" == *:* ]] || return 1
+    [[ "$ip" == ::1 || "$ip" == fe80::* || "$ip" == fc* || "$ip" == fd* || "$ip" == ff* ]] && return 1
+    return 0
+}
+
 is_ipv6() { [[ "$1" == *:* ]]; }
+
+is_valid_port() {
+    local port="$1"
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    (( port >= 1 && port <= 65535 ))
+}
+
+is_valid_domain() {
+    local domain="$1"
+    [[ -n "$domain" ]] || return 1
+    [[ "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]
+}
+
 format_host_for_uri() {
     local host="$1"
     if is_ipv6 "$host"; then echo "[$host]"; else echo "$host"; fi
 }
 
+prompt_port() {
+    local prompt_msg="$1" default_val="$2" var_name="$3"
+    local input
+    while true; do
+        read -rp "${prompt_msg} (默认: ${default_val}): " input
+        input="${input:-$default_val}"
+        if is_valid_port "$input"; then
+            printf -v "$var_name" '%s' "$input"
+            break
+        else
+            warn "端口号必须是 1-65535 之间的整数。"
+        fi
+    done
+}
+
+prompt_domain() {
+    local prompt_msg="$1" default_val="$2" var_name="$3"
+    local input
+    while true; do
+        read -rp "${prompt_msg} (默认: ${default_val}): " input
+        input="${input:-$default_val}"
+        if is_valid_domain "$input"; then
+            printf -v "$var_name" '%s' "$input"
+            break
+        else
+            warn "请输入有效的域名。"
+        fi
+    done
+}
+
+# --- Persistent info (safe loader) ---
 load_persistent_info() {
-    if [ -f "$PERSISTENT_INFO_FILE" ]; then
-        info "加载上次保存的配置信息从: $PERSISTENT_INFO_FILE"
-        # Source 文件以加载变量。
-        source "$PERSISTENT_INFO_FILE"
-        success "配置信息加载完成。"
-    else
+    if [ ! -f "$PERSISTENT_INFO_FILE" ]; then
         info "未找到持久化的配置信息文件。"
+        return
     fi
+
+    local key value
+    while IFS='=' read -r key value; do
+        [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+        value="${value%\"}"; value="${value#\"}"
+        value="${value%\'}"; value="${value#\'}"
+        case "$key" in
+            LAST_SERVER_IP) LAST_SERVER_IP="$value" ;;
+            LAST_SERVER_IP4) LAST_SERVER_IP4="$value" ;;
+            LAST_SERVER_IP6) LAST_SERVER_IP6="$value" ;;
+            LAST_HY2_PORT) LAST_HY2_PORT="$value" ;;
+            LAST_HY2_PASSWORD) LAST_HY2_PASSWORD="$value" ;;
+            LAST_HY2_MASQUERADE_CN) LAST_HY2_MASQUERADE_CN="$value" ;;
+            LAST_HY2_LINK) LAST_HY2_LINK="$value" ;;
+            LAST_REALITY_PORT) LAST_REALITY_PORT="$value" ;;
+            LAST_REALITY_UUID) LAST_REALITY_UUID="$value" ;;
+            LAST_REALITY_PUBLIC_KEY) LAST_REALITY_PUBLIC_KEY="$value" ;;
+            LAST_REALITY_SNI) LAST_REALITY_SNI="$value" ;;
+            LAST_REALITY_SHORT_ID) LAST_REALITY_SHORT_ID="$value" ;;
+            LAST_REALITY_FINGERPRINT) LAST_REALITY_FINGERPRINT="$value" ;;
+            LAST_VLESS_LINK) LAST_VLESS_LINK="$value" ;;
+            LAST_INSTALL_MODE) LAST_INSTALL_MODE="$value" ;;
+            LINK_IP_MODE) LINK_IP_MODE="$value" ;;
+        esac
+    done < "$PERSISTENT_INFO_FILE"
+
+    success "配置信息加载完成。"
 }
 
 save_persistent_info() {
     info "正在保存当前配置信息到: $PERSISTENT_INFO_FILE"
     mkdir -p "$(dirname "$PERSISTENT_INFO_FILE")"
-    cat > "$PERSISTENT_INFO_FILE" <<EOF
-LAST_SERVER_IP="${LAST_SERVER_IP}"
-LAST_SERVER_IP4="${LAST_SERVER_IP4}"
-LAST_SERVER_IP6="${LAST_SERVER_IP6}"
-LAST_HY2_PORT="${LAST_HY2_PORT}"
-LAST_HY2_PASSWORD="${LAST_HY2_PASSWORD}"
-LAST_HY2_MASQUERADE_CN="${LAST_HY2_MASQUERADE_CN}"
-LAST_HY2_LINK="${LAST_HY2_LINK}"
-LAST_REALITY_PORT="${LAST_REALITY_PORT}"
-LAST_REALITY_UUID="${LAST_REALITY_UUID}"
-LAST_REALITY_PUBLIC_KEY="${LAST_REALITY_PUBLIC_KEY}"
-LAST_REALITY_SNI="${LAST_REALITY_SNI}"
-LAST_REALITY_SHORT_ID="${LAST_REALITY_SHORT_ID}"
-LAST_REALITY_FINGERPRINT="${LAST_REALITY_FINGERPRINT}"
-LAST_VLESS_LINK="${LAST_VLESS_LINK}"
-LAST_INSTALL_MODE="${LAST_INSTALL_MODE}"
-LINK_IP_MODE="${LINK_IP_MODE}"
-EOF
-    if [ $? -eq 0 ]; then
-        success "配置信息保存成功。"
-    else
-        error "配置信息保存失败。"
-    fi
+    {
+        echo "LAST_SERVER_IP=\"${LAST_SERVER_IP}\""
+        echo "LAST_SERVER_IP4=\"${LAST_SERVER_IP4}\""
+        echo "LAST_SERVER_IP6=\"${LAST_SERVER_IP6}\""
+        echo "LAST_HY2_PORT=\"${LAST_HY2_PORT}\""
+        echo "LAST_HY2_PASSWORD=\"${LAST_HY2_PASSWORD}\""
+        echo "LAST_HY2_MASQUERADE_CN=\"${LAST_HY2_MASQUERADE_CN}\""
+        echo "LAST_HY2_LINK=\"${LAST_HY2_LINK}\""
+        echo "LAST_REALITY_PORT=\"${LAST_REALITY_PORT}\""
+        echo "LAST_REALITY_UUID=\"${LAST_REALITY_UUID}\""
+        echo "LAST_REALITY_PUBLIC_KEY=\"${LAST_REALITY_PUBLIC_KEY}\""
+        echo "LAST_REALITY_SNI=\"${LAST_REALITY_SNI}\""
+        echo "LAST_REALITY_SHORT_ID=\"${LAST_REALITY_SHORT_ID}\""
+        echo "LAST_REALITY_FINGERPRINT=\"${LAST_REALITY_FINGERPRINT}\""
+        echo "LAST_VLESS_LINK=\"${LAST_VLESS_LINK}\""
+        echo "LAST_INSTALL_MODE=\"${LAST_INSTALL_MODE}\""
+        echo "LINK_IP_MODE=\"${LINK_IP_MODE}\""
+    } > "$PERSISTENT_INFO_FILE"
+    chmod 600 "$PERSISTENT_INFO_FILE"
+    success "配置信息保存成功。"
 }
 
 check_root() {
@@ -142,13 +204,13 @@ check_root() {
 
 attempt_install_package() {
     local package_name="$1"
-    local friendly_name="${2:-$package_name}" # 如果第二个参数未提供，则使用包名本身
+    local friendly_name="${2:-$package_name}"
 
     if command -v "$package_name" &>/dev/null; then
-        return 0 # 已安装
+        return 0
     fi
 
-    read -p "依赖 '${friendly_name}' 未安装。是否尝试自动安装? (y/N): " install_confirm
+    read -rp "依赖 '${friendly_name}' 未安装。是否尝试自动安装? (y/N): " install_confirm
     if [[ ! "$install_confirm" =~ ^[Yy]$ ]]; then
         warn "跳过安装 '${friendly_name}'。某些功能可能因此不可用或显示不完整。"
         return 1
@@ -194,7 +256,6 @@ check_dependencies() {
     success "核心依赖检查通过。"
 }
 
-# 此函数现在仅检查/安装 qrencode 并返回状态。
 check_and_prepare_qrencode() {
     if ! command -v qrencode &>/dev/null; then
         if attempt_install_package "qrencode" "二维码生成工具(qrencode)"; then
@@ -222,72 +283,81 @@ find_and_set_singbox_cmd() {
     fi
 }
 
-# --- 获取公网 IPv4 / IPv6，并可用于选择导入链接 IP 模式 ---
+# --- IP detection: local-first, no external services ---
 get_server_ips() {
     LAST_SERVER_IP4=""
     LAST_SERVER_IP6=""
 
-    # IPv4
-    LAST_SERVER_IP4="$(curl -4 -fsS --max-time 5 https://api.ipify.org || true)"
-    [[ -z "$LAST_SERVER_IP4" ]] && LAST_SERVER_IP4="$(curl -4 -fsS --max-time 5 https://ipv4.icanhazip.com || true)"
-    if [[ -z "$LAST_SERVER_IP4" ]] && command -v dig &>/dev/null; then
-        LAST_SERVER_IP4="$(dig +short -4 myip.opendns.com @resolver1.opendns.com 2>/dev/null | tail -n1)"
-    fi
-    if ! is_public_ipv4 "$LAST_SERVER_IP4"; then LAST_SERVER_IP4=""; fi
-
-    # IPv6
-    LAST_SERVER_IP6="$(curl -6 -fsS --max-time 5 https://api64.ipify.org || true)"
-    [[ -z "$LAST_SERVER_IP6" ]] && LAST_SERVER_IP6="$(curl -6 -fsS --max-time 5 https://ipv6.icanhazip.com || true)"
-    if [[ -z "$LAST_SERVER_IP6" ]] && command -v dig &>/dev/null; then
-        LAST_SERVER_IP6="$(dig +short -6 myip.opendns.com @resolver1.opendns.com 2>/dev/null | tail -n1)"
-    fi
-
-    # 兜底：hostname -I
-    if [[ -z "$LAST_SERVER_IP4" && -z "$LAST_SERVER_IP6" ]]; then
-        local host_ips; host_ips="$(hostname -I 2>/dev/null || true)"
-        if [[ -n "$host_ips" ]]; then
-            for ip in $host_ips; do if is_public_ipv4 "$ip"; then LAST_SERVER_IP4="$ip"; break; fi; done
-            if [[ -z "$LAST_SERVER_IP4" ]]; then
-                for ip in $host_ips; do if is_ipv6 "$ip"; then LAST_SERVER_IP6="$ip"; break; fi; done
+    if command -v ip &>/dev/null; then
+        local v4_ips v6_ips
+        v4_ips=$(ip -4 addr show 2>/dev/null | grep -oP '(?<=inet\s)[0-9]+(\.[0-9]+){3}' || true)
+        for ip in $v4_ips; do
+            if is_public_ipv4 "$ip" && [ -z "$LAST_SERVER_IP4" ]; then
+                LAST_SERVER_IP4="$ip"
             fi
+        done
+        v6_ips=$(ip -6 addr show 2>/dev/null | grep -oP '(?<=inet6\s)[0-9a-fA-F:]+' || true)
+        for ip in $v6_ips; do
+            if is_public_ipv6 "$ip" && [ -z "$LAST_SERVER_IP6" ]; then
+                LAST_SERVER_IP6="$ip"
+            fi
+        done
+    fi
+
+    if [ -z "$LAST_SERVER_IP4" ] && [ -z "$LAST_SERVER_IP6" ]; then
+        local host_ips
+        host_ips=$(hostname -I 2>/dev/null || true)
+        if [ -n "$host_ips" ]; then
+            for ip in $host_ips; do
+                if is_public_ipv4 "$ip" && [ -z "$LAST_SERVER_IP4" ]; then
+                    LAST_SERVER_IP4="$ip"
+                elif is_public_ipv6 "$ip" && [ -z "$LAST_SERVER_IP6" ]; then
+                    LAST_SERVER_IP6="$ip"
+                fi
+            done
         fi
     fi
 
-    # 仍无任何公网 IP
-    if [[ -z "$LAST_SERVER_IP4" && -z "$LAST_SERVER_IP6" ]]; then
+    if [ -z "$LAST_SERVER_IP4" ] && [ -z "$LAST_SERVER_IP6" ]; then
         warn "未自动获取到公网 IP。"
-        read -p "请输入服务器公网 IPv4（推荐）或 IPv6: " MANUAL_IP
-        if is_public_ipv4 "$MANUAL_IP"; then LAST_SERVER_IP4="$MANUAL_IP"; else LAST_SERVER_IP6="$MANUAL_IP"; fi
+        local manual_ip=""
+        while [ -z "$manual_ip" ]; do
+            read -rp "请输入服务器公网 IPv4（推荐）或 IPv6: " manual_ip
+            if is_public_ipv4 "$manual_ip"; then
+                LAST_SERVER_IP4="$manual_ip"
+            elif is_public_ipv6 "$manual_ip"; then
+                LAST_SERVER_IP6="$manual_ip"
+            else
+                error "输入的 IP 地址无效。"
+                manual_ip=""
+            fi
+        done
     fi
 
-    if [[ -n "$LAST_SERVER_IP4" ]]; then info "检测到公网 IPv4: $LAST_SERVER_IP4"; fi
-    if [[ -n "$LAST_SERVER_IP6" ]]; then info "检测到公网 IPv6: $LAST_SERVER_IP6"; fi
+    [ -n "$LAST_SERVER_IP4" ] && info "检测到公网 IPv4: $LAST_SERVER_IP4"
+    [ -n "$LAST_SERVER_IP6" ] && info "检测到公网 IPv6: $LAST_SERVER_IP6"
 
-    # 兼容旧字段，用于提示
     LAST_SERVER_IP="${LAST_SERVER_IP4:-$LAST_SERVER_IP6}"
 }
 
 choose_link_ip_mode() {
-    local show_v4="1) 仅使用 IPv4 生成导入链接（默认）"
-    local show_v6="2) 仅使用 IPv6 生成导入链接"
-    local show_both="3) 同时生成 IPv4 与 IPv6 的导入链接"
-
     echo "------------------------------------------------"
     echo "导入链接 IP 生成选项："
-    if [[ -n "$LAST_SERVER_IP4" && -n "$LAST_SERVER_IP6" ]]; then
-        echo "  $show_v4"
-        echo "  $show_v6"
-        echo "  $show_both"
-        read -p "请选择 [1-3]（默认 1）: " sel
+    if [ -n "$LAST_SERVER_IP4" ] && [ -n "$LAST_SERVER_IP6" ]; then
+        echo "  1) 仅使用 IPv4 生成导入链接（默认）"
+        echo "  2) 仅使用 IPv6 生成导入链接"
+        echo "  3) 同时生成 IPv4 与 IPv6 的导入链接"
+        local sel
+        read -rp "请选择 [1-3]（默认 1）: " sel
         case "$sel" in
             2) LINK_IP_MODE="6" ;;
             3) LINK_IP_MODE="both" ;;
             *) LINK_IP_MODE="4" ;;
         esac
-    elif [[ -n "$LAST_SERVER_IP4" ]]; then
+    elif [ -n "$LAST_SERVER_IP4" ]; then
         echo "  仅检测到 IPv4，将使用 IPv4。"
         LINK_IP_MODE="4"
-    elif [[ -n "$LAST_SERVER_IP6" ]]; then
+    elif [ -n "$LAST_SERVER_IP6" ]; then
         echo "  仅检测到 IPv6，将使用 IPv6。"
         LINK_IP_MODE="6"
         warn "提示：部分客户端（如 v2rayN）导入 URI 对纯 IPv6 支持较差。"
@@ -296,7 +366,7 @@ choose_link_ip_mode() {
 }
 
 generate_random_password() {
-    openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 16
+    openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c 16
 }
 
 install_singbox_core() {
@@ -304,22 +374,35 @@ install_singbox_core() {
         info "Sing-box 已检测到在 $SINGBOX_INSTALL_PATH_EXPECTED."
         find_and_set_singbox_cmd
         if [ -n "$SINGBOX_CMD" ]; then
-            current_version=$($SINGBOX_CMD version | awk '{print $3}' 2>/dev/null)
+            local current_version
+            current_version=$($SINGBOX_CMD version | awk '{print $3}' 2>/dev/null || true)
             if [ -n "$current_version" ]; then
                 info "当前版本: $current_version"
             else
-                info "无法确定当前版本 (可能是旧版sing-box或命令问题)。"
+                info "无法确定当前版本 (可能是旧版 sing-box 或命令问题)。"
             fi
-        else
-            info "无法确定当前版本，因为 sing-box 命令未找到。"
         fi
-        read -p "是否重新安装/更新 Sing-box (beta)? (y/N): " reinstall_choice
+        local reinstall_choice
+        read -rp "是否重新安装/更新 Sing-box (beta)? (y/N): " reinstall_choice
         if [[ ! "$reinstall_choice" =~ ^[Yy]$ ]]; then
             return 0
         fi
     fi
+
     info "正在安装/更新 Sing-box (beta)..."
-    if bash -c "$(curl -fsSL https://sing-box.vercel.app/)" @ install --beta; then
+    local install_script_url="https://sing-box.vercel.app/"
+    local tmp_script
+    tmp_script=$(mktemp)
+
+    if ! curl -fsSL --proto '=https' --tlsv1.2 "$install_script_url" -o "$tmp_script"; then
+        error "下载 Sing-box 安装脚本失败。"
+        rm -f "$tmp_script"
+        return 1
+    fi
+
+    info "安装脚本已下载到: $tmp_script，开始执行..."
+    if bash "$tmp_script" install --beta; then
+        rm -f "$tmp_script"
         success "Sing-box 安装/更新成功。"
         find_and_set_singbox_cmd
         if [ -z "$SINGBOX_CMD" ]; then
@@ -327,6 +410,7 @@ install_singbox_core() {
             return 1
         fi
     else
+        rm -f "$tmp_script"
         error "Sing-box 安装失败。"
         return 1
     fi
@@ -337,13 +421,15 @@ generate_self_signed_cert() {
     local domain_cn="$1"
     if [ -f "$HYSTERIA_CERT_PEM" ] && [ -f "$HYSTERIA_CERT_KEY" ]; then
         info "检测到已存在的证书: ${HYSTERIA_CERT_PEM} 和 ${HYSTERIA_CERT_KEY}"
-        existing_cn=$(openssl x509 -in "$HYSTERIA_CERT_PEM" -noout -subject | sed -n 's/.*CN = \([^,]*\).*/\1/p')
+        local existing_cn
+        existing_cn=$(openssl x509 -in "$HYSTERIA_CERT_PEM" -noout -subject | sed -n 's/.*CN = \([^,]*\).*/\1/p' || true)
         if [ "$existing_cn" == "$domain_cn" ]; then
             info "证书 CN ($existing_cn) 与目标 ($domain_cn) 匹配，跳过重新生成。"
             return 0
         else
             warn "证书 CN ($existing_cn) 与目标 ($domain_cn) 不匹配。"
-            read -p "是否使用新的 CN ($domain_cn) 重新生成证书? (y/N): " regen_cert_choice
+            local regen_cert_choice
+            read -rp "是否使用新的 CN ($domain_cn) 重新生成证书? (y/N): " regen_cert_choice
             if [[ ! "$regen_cert_choice" =~ ^[Yy]$ ]]; then
                 info "保留现有证书。"
                 return 0
@@ -354,15 +440,12 @@ generate_self_signed_cert() {
     info "正在为 Hysteria2 生成自签名证书 (CN=${domain_cn})..."
     mkdir -p "$HYSTERIA_CERT_DIR"
     openssl ecparam -genkey -name prime256v1 -out "$HYSTERIA_CERT_KEY"
-    openssl req -new -x509 -days 36500 -key "$HYSTERIA_CERT_KEY" -out "$HYSTERIA_CERT_PEM" -subj "/CN=${domain_cn}"
-    if [ $? -eq 0 ]; then
-        success "自签名证书生成成功。"
-        info "证书: ${HYSTERIA_CERT_PEM}"
-        info "私钥: ${HYSTERIA_CERT_KEY}"
-    else
-        error "自签名证书生成失败。"
-        return 1
-    fi
+    chmod 600 "$HYSTERIA_CERT_KEY"
+    openssl req -new -x509 -days 3650 -key "$HYSTERIA_CERT_KEY" -out "$HYSTERIA_CERT_PEM" -subj "/CN=${domain_cn}"
+    chmod 600 "$HYSTERIA_CERT_PEM"
+    success "自签名证书生成成功。"
+    info "证书: ${HYSTERIA_CERT_PEM}"
+    info "私钥: ${HYSTERIA_CERT_KEY}"
 }
 
 generate_reality_credentials() {
@@ -374,49 +457,42 @@ generate_reality_credentials() {
             return 1
         fi
     fi
+
     info "使用命令 '$SINGBOX_CMD' 生成 Reality UUID 和 Keypair..."
-    
-    info "执行: $SINGBOX_CMD generate uuid"
-    REALITY_UUID_VAL=$($SINGBOX_CMD generate uuid)
-    CMD_EXIT_CODE=$?
-    if [ $CMD_EXIT_CODE -ne 0 ] || [ -z "$REALITY_UUID_VAL" ]; then
-        error "执行 '$SINGBOX_CMD generate uuid' 失败 (退出码: $CMD_EXIT_CODE) 或输出为空。"
-        error "UUID 命令输出: '$REALITY_UUID_VAL'"
-        return 1
-    fi
-    info "生成的 UUID: $REALITY_UUID_VAL"
-    LAST_REALITY_UUID="$REALITY_UUID_VAL"
 
-    info "执行: $SINGBOX_CMD generate reality-keypair"
-    KEY_PAIR_OUTPUT=$($SINGBOX_CMD generate reality-keypair)
-    CMD_EXIT_CODE=$?
-    if [ $CMD_EXIT_CODE -ne 0 ] || [ -z "$KEY_PAIR_OUTPUT" ]; then
-        error "执行 '$SINGBOX_CMD generate reality-keypair' 失败 (退出码: $CMD_EXIT_CODE) 或输出为空。"
-        error "Keypair 命令输出: '$KEY_PAIR_OUTPUT'"
-        return 1
-    fi
-    info "原始 Keypair 输出:"
-    echo "$KEY_PAIR_OUTPUT"
-    
-    REALITY_PRIVATE_KEY_VAL=$(echo "$KEY_PAIR_OUTPUT" | awk -F': ' '/PrivateKey:/ {print $2}' | xargs)
-    REALITY_PUBLIC_KEY_VAL=$(echo "$KEY_PAIR_OUTPUT" | awk -F': ' '/PublicKey:/ {print $2}' | xargs)
+    local reality_uuid_val key_pair_output reality_private_key_val reality_public_key_val
 
-    if [ -z "$REALITY_UUID_VAL" ] || [ -z "$REALITY_PRIVATE_KEY_VAL" ] || [ -z "$REALITY_PUBLIC_KEY_VAL" ]; then
-        error "生成 Reality凭证失败 (UUID, Private Key, 或 Public Key 在解析后为空)."
-        error "解析得到的 UUID: '$REALITY_UUID_VAL'"
-        error "解析得到的 Private Key: '$REALITY_PRIVATE_KEY_VAL'"
-        error "解析得到的 Public Key: '$REALITY_PUBLIC_KEY_VAL'"
+    reality_uuid_val=$($SINGBOX_CMD generate uuid)
+    if [ -z "$reality_uuid_val" ]; then
+        error "生成 UUID 失败或输出为空。"
         return 1
     fi
-    success "Reality UUID: $REALITY_UUID_VAL"
-    success "Reality Private Key: $REALITY_PRIVATE_KEY_VAL"
-    success "Reality Public Key: $REALITY_PUBLIC_KEY_VAL"
-    TEMP_REALITY_PRIVATE_KEY="$REALITY_PRIVATE_KEY_VAL"
-    LAST_REALITY_PUBLIC_KEY="$REALITY_PUBLIC_KEY_VAL"
+    info "生成的 UUID: $reality_uuid_val"
+    LAST_REALITY_UUID="$reality_uuid_val"
+
+    key_pair_output=$($SINGBOX_CMD generate reality-keypair)
+    if [ -z "$key_pair_output" ]; then
+        error "生成 Reality keypair 失败或输出为空。"
+        return 1
+    fi
+    echo "$key_pair_output"
+
+    reality_private_key_val=$(echo "$key_pair_output" | awk -F': ' '/PrivateKey:/ {print $2}' | xargs)
+    reality_public_key_val=$(echo "$key_pair_output" | awk -F': ' '/PublicKey:/ {print $2}' | xargs)
+
+    if [ -z "$reality_private_key_val" ] || [ -z "$reality_public_key_val" ]; then
+        error "解析 Reality keypair 失败。"
+        return 1
+    fi
+
+    success "Reality UUID: $reality_uuid_val"
+    success "Reality Public Key: $reality_public_key_val"
+    TEMP_REALITY_PRIVATE_KEY="$reality_private_key_val"
+    LAST_REALITY_PUBLIC_KEY="$reality_public_key_val"
 }
 
 create_config_json() {
-    local mode="$1" 
+    local mode="$1"
     local hy2_port="$2"
     local hy2_password="$3"
     local hy2_masquerade_cn="$4"
@@ -432,102 +508,72 @@ create_config_json() {
 
     info "正在创建配置文件: ${SINGBOX_CONFIG_FILE}"
     mkdir -p "$SINGBOX_CONFIG_DIR"
+    chmod 700 "$SINGBOX_CONFIG_DIR"
 
-    local inbounds_json_array=()
+    local inbounds_json="[]"
+
     if [ "$mode" == "all" ] || [ "$mode" == "hysteria2" ]; then
-        inbounds_json_array+=( "$(cat <<EOF
-        {
-            "type": "hysteria2",
-            "tag": "hy2-in",
-            "listen": "::",
-            "listen_port": ${hy2_port},
-            "users": [
-                {
-                    "password": "${hy2_password}"
+        inbounds_json=$(jq --argjson port "$hy2_port" \
+            --arg password "$hy2_password" \
+            --arg masquerade "https://${hy2_masquerade_cn}" \
+            --arg cert "$HYSTERIA_CERT_PEM" \
+            --arg key "$HYSTERIA_CERT_KEY" \
+            --arg sni "$hy2_masquerade_cn" \
+            '. + [{
+                type: "hysteria2",
+                tag: "hy2-in",
+                listen: "::",
+                listen_port: $port,
+                users: [{password: $password}],
+                masquerade: $masquerade,
+                up_mbps: 100,
+                down_mbps: 500,
+                tls: {
+                    enabled: true,
+                    alpn: ["h3"],
+                    certificate_path: $cert,
+                    key_path: $key,
+                    server_name: $sni
                 }
-            ],
-            "masquerade": "https://placeholder.services.mozilla.com",
-            "up_mbps": 100,
-            "down_mbps": 500,
-            "tls": {
-                "enabled": true,
-                "alpn": [
-                    "h3"
-                ],
-                "certificate_path": "${HYSTERIA_CERT_PEM}",
-                "key_path": "${HYSTERIA_CERT_KEY}",
-                "server_name": "${hy2_masquerade_cn}"
-            }
-        }
-EOF
-)" )
+            }]' <<< "$inbounds_json")
     fi
 
     if [ "$mode" == "all" ] || [ "$mode" == "reality" ]; then
-        inbounds_json_array+=( "$(cat <<EOF
-        {
-            "type": "vless",
-            "tag": "vless-in",
-            "listen": "::",
-            "listen_port": ${reality_port},
-            "users": [
-                {
-                    "uuid": "${reality_uuid}",
-                    "flow": "xtls-rprx-vision"
+        inbounds_json=$(jq --argjson port "$reality_port" \
+            --arg uuid "$reality_uuid" \
+            --arg sni "$reality_sni" \
+            --arg private_key "$reality_private_key" \
+            --arg short_id "$LAST_REALITY_SHORT_ID" \
+            '. + [{
+                type: "vless",
+                tag: "vless-in",
+                listen: "::",
+                listen_port: $port,
+                users: [{uuid: $uuid, flow: "xtls-rprx-vision"}],
+                tls: {
+                    enabled: true,
+                    server_name: $sni,
+                    reality: {
+                        enabled: true,
+                        handshake: {server: $sni, server_port: 443},
+                        private_key: $private_key,
+                        short_id: [$short_id]
+                    }
                 }
-            ],
-            "tls": {
-                "enabled": true,
-                "server_name": "${reality_sni}",
-                "reality": {
-                    "enabled": true,
-                    "handshake": {
-                        "server": "${reality_sni}",
-                        "server_port": 443
-                    },
-                    "private_key": "${reality_private_key}",
-                    "short_id": [
-                        "${LAST_REALITY_SHORT_ID}"
-                    ]
-                }
-            }
-        }
-EOF
-)" )
+            }]' <<< "$inbounds_json")
     fi
 
-    local final_inbounds_json
-    final_inbounds_json=$(IFS=,; echo "${inbounds_json_array[*]}")
+    jq -n --argjson inbounds "$inbounds_json" '{
+        log: {level: "info", timestamp: true},
+        inbounds: $inbounds,
+        outbounds: [
+            {type: "direct", tag: "direct"},
+            {type: "block", tag: "block"}
+        ],
+        route: {rules: [{protocol: "dns", outbound: "direct"}]}
+    }' > "$SINGBOX_CONFIG_FILE"
 
-    cat > "$SINGBOX_CONFIG_FILE" <<EOF
-{
-    "log": {
-        "level": "info",
-        "timestamp": true
-    },
-    "inbounds": [
-        ${final_inbounds_json}
-    ],
-    "outbounds": [
-        {
-            "type": "direct",
-            "tag": "direct"
-        },
-        {
-            "type": "block",
-            "tag": "block"
-        }
-    ],
-    "route": {
-        "rules": [
-            {
-                "protocol": "dns",
-                "outbound": "direct"
-            }
-        ]
-    }
-}
-EOF
+    chmod 600 "$SINGBOX_CONFIG_FILE"
 
     info "正在校验配置文件..."
     if $SINGBOX_CMD check -c "$SINGBOX_CONFIG_FILE"; then
@@ -554,7 +600,6 @@ create_systemd_service() {
     cat > "$SINGBOX_SERVICE_FILE" <<EOF
 [Unit]
 Description=Sing-Box Service
-Documentation=https://sing-box.sagernet.org
 After=network.target nss-lookup.target
 
 [Service]
@@ -597,15 +642,16 @@ display_and_store_config_info() {
     local qrencode_is_ready=false
     if check_and_prepare_qrencode; then qrencode_is_ready=true; fi
 
-    # 工具函数：基于给定 IP 生成导入链接
     gen_hy2_link() {
         local ip="$1"
-        local h="$(format_host_for_uri "$ip")"
+        local h
+        h=$(format_host_for_uri "$ip")
         echo "hy2://${LAST_HY2_PASSWORD}@${h}:${LAST_HY2_PORT}?sni=${LAST_HY2_MASQUERADE_CN}&alpn=h3&insecure=1#Hy2-${ip}-$(date +%s)"
     }
     gen_vless_link() {
         local ip="$1"
-        local h="$(format_host_for_uri "$ip")"
+        local h
+        h=$(format_host_for_uri "$ip")
         echo "vless://${LAST_REALITY_UUID}@${h}:${LAST_REALITY_PORT}?security=reality&sni=${LAST_REALITY_SNI}&fp=${LAST_REALITY_FINGERPRINT}&pbk=${LAST_REALITY_PUBLIC_KEY}&sid=${LAST_REALITY_SHORT_ID}&flow=xtls-rprx-vision&type=tcp#Reality-${ip}-$(date +%s)"
     }
 
@@ -626,7 +672,8 @@ display_and_store_config_info() {
         fi
         if [[ "$LINK_IP_MODE" == "6" || "$LINK_IP_MODE" == "both" ]]; then
             if [[ -n "$LAST_SERVER_IP6" ]]; then
-                local link6; link6="$(gen_hy2_link "$LAST_SERVER_IP6")"
+                local link6
+                link6="$(gen_hy2_link "$LAST_SERVER_IP6")"
                 echo -e "${CYAN}Hysteria2 导入链接(IPv6):${NC} ${GREEN}${link6}${NC}"
                 $qrencode_is_ready && command -v qrencode &>/dev/null && { echo "二维码(IPv6):"; qrencode -t ANSIUTF8 "${link6}"; }
             fi
@@ -651,7 +698,8 @@ display_and_store_config_info() {
         fi
         if [[ "$LINK_IP_MODE" == "6" || "$LINK_IP_MODE" == "both" ]]; then
             if [[ -n "$LAST_SERVER_IP6" ]]; then
-                local link6; link6="$(gen_vless_link "$LAST_SERVER_IP6")"
+                local link6
+                link6="$(gen_vless_link "$LAST_SERVER_IP6")"
                 echo -e "${CYAN}VLESS Reality 导入链接(IPv6):${NC} ${GREEN}${link6}${NC}"
                 $qrencode_is_ready && command -v qrencode &>/dev/null && { echo "二维码(IPv6):"; qrencode -t ANSIUTF8 "${link6}"; }
             fi
@@ -662,22 +710,18 @@ display_and_store_config_info() {
     save_persistent_info
 }
 
-# --- 安装函数 ---
+# --- Installation functions ---
 install_hysteria2_reality() {
     info "开始安装 Hysteria2 + Reality (共存)..."
     install_singbox_core || return 1
     get_server_ips
     choose_link_ip_mode
 
-    read -p "请输入 Hysteria2 监听端口 (默认: ${DEFAULT_HYSTERIA_PORT}): " temp_hy2_port
-    LAST_HY2_PORT=${temp_hy2_port:-$DEFAULT_HYSTERIA_PORT}
-    read -p "请输入 Hysteria2 伪装域名/证书CN (默认: ${DEFAULT_HYSTERIA_MASQUERADE_CN}): " temp_hy2_masquerade_cn
-    LAST_HY2_MASQUERADE_CN=${temp_hy2_masquerade_cn:-$DEFAULT_HYSTERIA_MASQUERADE_CN}
+    prompt_port "请输入 Hysteria2 监听端口" "$DEFAULT_HYSTERIA_PORT" LAST_HY2_PORT
+    prompt_domain "请输入 Hysteria2 伪装域名/证书CN" "$DEFAULT_HYSTERIA_MASQUERADE_CN" LAST_HY2_MASQUERADE_CN
 
-    read -p "请输入 Reality (VLESS) 监听端口 (默认: ${DEFAULT_REALITY_PORT}): " temp_reality_port
-    LAST_REALITY_PORT=${temp_reality_port:-$DEFAULT_REALITY_PORT}
-    read -p "请输入 Reality 目标SNI/握手服务器 (默认: ${DEFAULT_REALITY_SNI}): " temp_reality_sni
-    LAST_REALITY_SNI=${temp_reality_sni:-$DEFAULT_REALITY_SNI}
+    prompt_port "请输入 Reality (VLESS) 监听端口" "$DEFAULT_REALITY_PORT" LAST_REALITY_PORT
+    prompt_domain "请输入 Reality 目标SNI/握手服务器" "$DEFAULT_REALITY_SNI" LAST_REALITY_SNI
 
     LAST_HY2_PASSWORD=$(generate_random_password)
     info "生成的 Hysteria2 密码: ${LAST_HY2_PASSWORD}"
@@ -689,7 +733,7 @@ install_hysteria2_reality() {
         "$LAST_HY2_PORT" "$LAST_HY2_PASSWORD" "$LAST_HY2_MASQUERADE_CN" \
         "$LAST_REALITY_PORT" "$LAST_REALITY_UUID" "$TEMP_REALITY_PRIVATE_KEY" "$LAST_REALITY_SNI" \
         || return 1
-    
+
     create_systemd_service
     start_singbox_service || return 1
 
@@ -703,16 +747,14 @@ install_hysteria2_only() {
     get_server_ips
     choose_link_ip_mode
 
-    read -p "请输入 Hysteria2 监听端口 (默认: ${DEFAULT_HYSTERIA_PORT}): " temp_hy2_port
-    LAST_HY2_PORT=${temp_hy2_port:-$DEFAULT_HYSTERIA_PORT}
-    read -p "请输入 Hysteria2 伪装域名/证书CN (默认: ${DEFAULT_HYSTERIA_MASQUERADE_CN}): " temp_hy2_masquerade_cn
-    LAST_HY2_MASQUERADE_CN=${temp_hy2_masquerade_cn:-$DEFAULT_HYSTERIA_MASQUERADE_CN}
+    prompt_port "请输入 Hysteria2 监听端口" "$DEFAULT_HYSTERIA_PORT" LAST_HY2_PORT
+    prompt_domain "请输入 Hysteria2 伪装域名/证书CN" "$DEFAULT_HYSTERIA_MASQUERADE_CN" LAST_HY2_MASQUERADE_CN
 
     LAST_HY2_PASSWORD=$(generate_random_password)
     info "生成的 Hysteria2 密码: ${LAST_HY2_PASSWORD}"
 
     generate_self_signed_cert "$LAST_HY2_MASQUERADE_CN" || return 1
-    
+
     LAST_REALITY_PORT=""
     LAST_REALITY_UUID=""
     LAST_REALITY_PUBLIC_KEY=""
@@ -737,13 +779,11 @@ install_reality_only() {
     get_server_ips
     choose_link_ip_mode
 
-    read -p "请输入 Reality (VLESS) 监听端口 (默认: ${DEFAULT_REALITY_PORT}): " temp_reality_port
-    LAST_REALITY_PORT=${temp_reality_port:-$DEFAULT_REALITY_PORT}
-    read -p "请输入 Reality 目标SNI/握手服务器 (默认: ${DEFAULT_REALITY_SNI}): " temp_reality_sni
-    LAST_REALITY_SNI=${temp_reality_sni:-$DEFAULT_REALITY_SNI}
+    prompt_port "请输入 Reality (VLESS) 监听端口" "$DEFAULT_REALITY_PORT" LAST_REALITY_PORT
+    prompt_domain "请输入 Reality 目标SNI/握手服务器" "$DEFAULT_REALITY_SNI" LAST_REALITY_SNI
 
     generate_reality_credentials || return 1
-    
+
     LAST_HY2_PORT=""
     LAST_HY2_PASSWORD=""
     LAST_HY2_MASQUERADE_CN=""
@@ -753,7 +793,7 @@ install_reality_only() {
         "" "" "" \
         "$LAST_REALITY_PORT" "$LAST_REALITY_UUID" "$TEMP_REALITY_PRIVATE_KEY" "$LAST_REALITY_SNI" \
         || return 1
-        
+
     create_systemd_service
     start_singbox_service || return 1
 
@@ -773,16 +813,16 @@ show_current_import_info() {
 
 uninstall_singbox() {
     warn "你确定要卸载 Sing-box 吗?"
-    read -p "此操作将停止并禁用服务，删除可执行文件和相关配置文件目录。是否继续卸载? (y/N): " confirm_uninstall
+    read -rp "此操作将停止并禁用服务，删除可执行文件和相关配置文件目录。是否继续卸载? (y/N): " confirm_uninstall
     if [[ ! "$confirm_uninstall" =~ ^[Yy]$ ]]; then
         info "卸载已取消。"
         return
     fi
 
     info "正在停止 sing-box 服务..."
-    systemctl stop sing-box &>/dev/null
+    systemctl stop sing-box &>/dev/null || true
     info "正在禁用 sing-box 服务..."
-    systemctl disable sing-box &>/dev/null
+    systemctl disable sing-box &>/dev/null || true
 
     if [ -f "$SINGBOX_SERVICE_FILE" ]; then
         info "正在删除 systemd 服务文件: ${SINGBOX_SERVICE_FILE}"
@@ -796,7 +836,7 @@ uninstall_singbox() {
     elif [ -f "$SINGBOX_INSTALL_PATH_EXPECTED" ]; then
         singbox_exe_to_remove="$SINGBOX_INSTALL_PATH_EXPECTED"
     fi
-    
+
     local official_install_path="/usr/local/bin/sing-box"
     if [ -f "$official_install_path" ]; then
         if [ -n "$singbox_exe_to_remove" ] && [ "$singbox_exe_to_remove" != "$official_install_path" ]; then
@@ -813,8 +853,8 @@ uninstall_singbox() {
     else
         warn "未找到明确的 sing-box 执行文件进行删除 (已检查 ${SINGBOX_INSTALL_PATH_EXPECTED} 和 ${official_install_path})。"
     fi
-    
-    read -p "是否删除配置文件目录 ${SINGBOX_CONFIG_DIR} (包含导入信息缓存)? (y/N): " delete_config_dir_confirm
+
+    read -rp "是否删除配置文件目录 ${SINGBOX_CONFIG_DIR} (包含导入信息缓存)? (y/N): " delete_config_dir_confirm
     if [[ "$delete_config_dir_confirm" =~ ^[Yy]$ ]]; then
         if [ -d "$SINGBOX_CONFIG_DIR" ]; then
             info "正在删除配置目录 (包括 ${PERSISTENT_INFO_FILE})..."
@@ -823,8 +863,8 @@ uninstall_singbox() {
     else
         info "配置文件目录 (${SINGBOX_CONFIG_DIR}) 已保留。"
     fi
-    
-    read -p "是否删除 Hysteria2 证书目录 ${HYSTERIA_CERT_DIR}? (y/N): " delete_cert_dir_confirm
+
+    read -rp "是否删除 Hysteria2 证书目录 ${HYSTERIA_CERT_DIR}? (y/N): " delete_cert_dir_confirm
     if [[ "$delete_cert_dir_confirm" =~ ^[Yy]$ ]]; then
         if [ -d "$HYSTERIA_CERT_DIR" ]; then
             info "正在删除 Hysteria2 证书目录..."
@@ -839,7 +879,7 @@ uninstall_singbox() {
     SINGBOX_CMD=""
 }
 
-# --- 管理函数 ---
+# --- Management functions ---
 manage_singbox() {
     local action=$1
     if [ -z "$SINGBOX_CMD" ]; then
@@ -897,7 +937,7 @@ manage_singbox() {
                     error "'nano' 或 'vim' 未安装。请手动编辑: ${SINGBOX_CONFIG_FILE}"
                     return
                 fi
-                read -p "配置文件已编辑，是否立即重启 sing-box 服务? (y/N): " restart_confirm
+                read -rp "配置文件已编辑，是否立即重启 sing-box 服务? (y/N): " restart_confirm
                 if [[ "$restart_confirm" =~ ^[Yy]$ ]]; then
                     manage_singbox "restart"
                 fi
@@ -911,10 +951,10 @@ manage_singbox() {
     esac
 }
 
-# --- 主菜单 ---
+# --- Main menu ---
 show_menu() {
     clear
-    print_author_info
+    print_header
 
     echo -e "${GREEN}${BOLD}安装选项:${NC}"
     echo "  1. 安装 Hysteria2 + Reality (共存)"
@@ -937,7 +977,8 @@ show_menu() {
     echo "  13. 卸载 Sing-box"
     echo "  0.  退出脚本"
     echo "================================================"
-    read -p "请输入选项 [0-14]: " choice
+    local choice
+    read -rp "请输入选项 [0-14]: " choice
 
     case "$choice" in
         1) install_hysteria2_reality ;;
@@ -960,13 +1001,12 @@ show_menu() {
     echo ""
 }
 
-# --- 脚本入口点 ---
+# --- Entry point ---
 check_root
 check_dependencies
 find_and_set_singbox_cmd
 load_persistent_info
 
-# 主循环
 while true; do
     show_menu
     read -n 1 -s -r -p "按任意键返回主菜单 (或按 Ctrl+C 退出)..."
