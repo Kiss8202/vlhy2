@@ -135,6 +135,32 @@ prompt_domain() {
     done
 }
 
+install_script_shortcut() {
+    local script_dir script_name source_script
+    script_dir=$(cd "$(dirname "$0")" && pwd)
+    script_name=$(basename "$0")
+    source_script="${script_dir}/${script_name}"
+
+    local target_script="/usr/local/bin/lvhy.sh"
+    local shortcut="/usr/local/bin/sb"
+
+    if [[ "$script_name" == "bash" || "$source_script" == "/dev/fd/"* || ! -f "$source_script" ]]; then
+        warn "检测到脚本通过 pipe 或临时方式运行，无法创建 sb 快捷命令。"
+        info "如需使用 sb 快捷命令，请先下载脚本文件到本地再执行安装。"
+        return 1
+    fi
+
+    info "正在安装脚本快捷命令 sb ..."
+    cp -f "$source_script" "$target_script"
+    chmod 755 "$target_script"
+    cat > "$shortcut" <<EOF
+#!/bin/bash
+exec sudo bash ${target_script} "\$@"
+EOF
+    chmod 755 "$shortcut"
+    success "快捷命令 sb 安装完成。之后可直接输入 sb 进入菜单。"
+}
+
 # --- Persistent info (safe loader) ---
 load_persistent_info() {
     if [ ! -f "$PERSISTENT_INFO_FILE" ]; then
@@ -736,6 +762,7 @@ install_hysteria2_reality() {
 
     create_systemd_service
     start_singbox_service || return 1
+    install_script_shortcut || true
 
     success "Hysteria2 + Reality 安装配置完成！"
     display_and_store_config_info "all"
@@ -768,6 +795,7 @@ install_hysteria2_only() {
 
     create_systemd_service
     start_singbox_service || return 1
+    install_script_shortcut || true
 
     success "Hysteria2 单独安装配置完成！"
     display_and_store_config_info "hysteria2"
@@ -796,6 +824,7 @@ install_reality_only() {
 
     create_systemd_service
     start_singbox_service || return 1
+    install_script_shortcut || true
 
     success "Reality (VLESS) 单独安装配置完成！"
     display_and_store_config_info "reality"
