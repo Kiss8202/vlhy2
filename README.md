@@ -49,9 +49,9 @@
 建议先下载到本地，检查内容后再执行：
 
 ```bash
-wget -O lvhy.sh https://raw.githubusercontent.com/Netflixxp/vlhy2/main/lvhy.sh
+wget -O lvhy.sh https://raw.githubusercontent.com/kiss8202/vlhy2/main/lvhy.sh
 # 或
-# curl -fsSL -o lvhy.sh https://raw.githubusercontent.com/Netflixxp/vlhy2/main/lvhy.sh
+# curl -fsSL -o lvhy.sh https://raw.githubusercontent.com/kiss8202/vlhy2/main/lvhy.sh
 
 chmod +x lvhy.sh
 sudo bash lvhy.sh
