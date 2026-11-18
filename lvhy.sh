@@ -583,7 +583,7 @@ create_config_json() {
                         enabled: true,
                         handshake: {server: $sni, server_port: 443},
                         private_key: $private_key,
-                        short_id: [$short_id]
+                        short_id: [[$short_id]]
                     }
                 }
             }]' <<< "$inbounds_json")
