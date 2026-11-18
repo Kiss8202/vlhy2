@@ -49,7 +49,7 @@
 建议先下载到本地，检查内容后再执行：
 
 ```bash
-wget -O lvhy.sh https://raw.githubusercontent.com/kiss8202/vlhy2/main/install.sh && chmod +x install.sh && sudo bash install.sh
+wget -O install.sh https://raw.githubusercontent.com/kiss8202/vlhy2/main/install.sh && chmod +x install.sh && sudo bash install.sh
 ```
 ```bash
 
