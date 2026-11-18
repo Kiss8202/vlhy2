@@ -52,8 +52,8 @@
 wget -O lvhy.sh https://raw.githubusercontent.com/kiss8202/vlhy2/main/lvhy.sh && chmod +x lvhy.sh && sudo bash lvhy.sh
 ```
 ```bash
-# 或
-# curl -fsSL -o lvhy.sh https://raw.githubusercontent.com/kiss8202/vlhy2/main/lvhy.sh
+
+curl -fsSL -o lvhy.sh https://raw.githubusercontent.com/kiss8202/vlhy2/main/lvhy.sh
 
 chmod +x lvhy.sh
 sudo bash lvhy.sh
