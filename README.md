@@ -49,20 +49,20 @@
 建议先下载到本地，检查内容后再执行：
 
 ```bash
-wget -O lvhy.sh https://raw.githubusercontent.com/kiss8202/vlhy2/main/lvhy.sh && chmod +x lvhy.sh && sudo bash lvhy.sh
+wget -O lvhy.sh https://raw.githubusercontent.com/kiss8202/vlhy2/main/install.sh && chmod +x install.sh && sudo bash install.sh
 ```
 ```bash
 
-curl -fsSL -o lvhy.sh https://raw.githubusercontent.com/kiss8202/vlhy2/main/lvhy.sh
+curl -fsSL -o install.sh https://raw.githubusercontent.com/kiss8202/vlhy2/main/install.sh
 
-chmod +x lvhy.sh
-sudo bash lvhy.sh
+chmod +x install.sh
+sudo bash install.sh
 ```
 
 ### 2. 再次运行脚本
 
 ```bash
-sudo bash lvhy.sh
+sudo bash install.sh
 ```
 
 脚本将以 root 权限运行，并显示主菜单。
@@ -71,7 +71,7 @@ sudo bash lvhy.sh
 
 首次通过菜单选项 `1`、`2` 或 `3` 完成安装后，脚本会自动：
 
-1. 将自身复制到 `/usr/local/bin/lvhy.sh`
+1. 将自身复制到 `/usr/local/bin/install.sh`
 2. 创建 `/usr/local/bin/sb` 快捷命令
 
 之后在任何目录下直接输入即可进入菜单：
