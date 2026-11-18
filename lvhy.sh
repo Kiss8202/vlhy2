@@ -141,7 +141,7 @@ install_script_shortcut() {
     script_name=$(basename "$0")
     source_script="${script_dir}/${script_name}"
 
-    local target_script="/usr/local/bin/lvhy.sh"
+    local target_script="/usr/local/bin/install.sh"
     local shortcut="/usr/local/bin/sb"
 
     if [[ "$script_name" == "bash" || "$source_script" == "/dev/fd/"* || ! -f "$source_script" ]]; then
