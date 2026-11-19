@@ -91,7 +91,14 @@ is_public_ipv4() {
 is_public_ipv6() {
     local ip="$1"
     [[ "$ip" == *:* ]] || return 1
+    [[ "$ip" == "::" ]] && return 1
     [[ "$ip" == ::1 || "$ip" == fe80::* || "$ip" == fc* || "$ip" == fd* || "$ip" == ff* ]] && return 1
+    [[ "$ip" == ::ffff:* ]] && return 1
+    # 注意用单冒号前缀匹配（2002:*），压缩写法 2002::x 与完整写法 2002:0100:... 均覆盖
+    [[ "$ip" == 2001:db8:* ]] && return 1
+    [[ "$ip" == 2002:* ]] && return 1
+    [[ "$ip" == 64:ff9b:* ]] && return 1
+    [[ "$ip" == 100:* ]] && return 1
     return 0
 }
 
@@ -115,17 +122,38 @@ format_host_for_uri() {
     if is_ipv6 "$host"; then echo "[$host]"; else echo "$host"; fi
 }
 
+_list_listeners() {
+    # 输出监听端口列表（含进程信息）；ss 不支持 -H 时回退 netstat
+    # $1: tcp / udp / both
+    local proto="$1"
+    local flag="-tuln"
+    case "$proto" in
+        tcp) flag="-tln" ;;
+        udp) flag="-uln" ;;
+    esac
+    if command -v ss &>/dev/null; then
+        # 老版本 iproute2（如 CentOS 7 的 ss 3.10）不支持 -H，运行时探测
+        if ss -H -tln >/dev/null 2>&1; then
+            ss -H "$flag" -p 2>/dev/null
+            return 0
+        fi
+    fi
+    if command -v netstat &>/dev/null; then
+        netstat "$flag" -p 2>/dev/null
+        return 0
+    fi
+    return 1
+}
+
 is_port_in_use() {
     local port="$1"
     local proto="${2:-both}"
-    command -v ss &>/dev/null || return 1
-    local ss_flag="-tuln"
-    case "$proto" in
-        udp) ss_flag="-uln" ;;
-        tcp) ss_flag="-tln" ;;
-    esac
-    # 排除 sing-box 自身占用（重装/更新场景属正常），其余进程占用则视为冲突
-    ss -H $ss_flag -p 2>/dev/null | grep -E ":${port}[[:space:]]" | grep -v 'sing-box' | grep -q .
+    # 用 $(...) 收集结果，避免 grep -q 提前关闭管道在 pipefail 下产生 141
+    # 仅精确排除 sing-box 自身（ss: "sing-box",pid= / netstat: pid/sing-box），
+    # 避免误伤 sing-box-monitor 之类名称含 sing-box 的其他进程
+    local lines
+    lines=$(_list_listeners "$proto" | grep -E ":${port}[[:space:]]" | grep -v -e 'sing-box",pid=' -e '/sing-box$' || true)
+    [[ -n "$lines" ]]
 }
 
 prompt_port() {
@@ -423,8 +451,8 @@ choose_link_ip_mode() {
 }
 
 generate_random_password() {
-    # 16 位十六进制字符（64bit 熵），无管道截断、URI 安全
-    openssl rand -hex 8
+    # 32 位十六进制字符（128bit 熵），无管道截断、URI 安全
+    openssl rand -hex 16
 }
 
 install_singbox_core() {
@@ -480,9 +508,12 @@ generate_self_signed_cert() {
     if [ -f "$HYSTERIA_CERT_PEM" ] && [ -f "$HYSTERIA_CERT_KEY" ]; then
         info "检测到已存在的证书: ${HYSTERIA_CERT_PEM} 和 ${HYSTERIA_CERT_KEY}"
         local existing_cn
-        existing_cn=$(openssl x509 -in "$HYSTERIA_CERT_PEM" -noout -subject | sed -n 's/.*CN = \([^,]*\).*/\1/p' || true)
+        # 兼容新旧两种 subject 格式: "CN = x" (OpenSSL 1.1+) 与 "/CN=x" (1.0.x)
+        existing_cn=$(openssl x509 -in "$HYSTERIA_CERT_PEM" -noout -subject | sed -n 's/.*CN[[:space:]]*=[[:space:]]*\([^,]*\).*/\1/p' || true)
         if [ "$existing_cn" == "$domain_cn" ]; then
-            if openssl x509 -in "$HYSTERIA_CERT_PEM" -noout -text 2>/dev/null | grep -q "Subject Alternative Name"; then
+            local cert_san_text
+            cert_san_text=$(openssl x509 -in "$HYSTERIA_CERT_PEM" -noout -text 2>/dev/null | grep "Subject Alternative Name" || true)
+            if [ -n "$cert_san_text" ]; then
                 info "证书 CN ($existing_cn) 与目标 ($domain_cn) 匹配，跳过重新生成。"
                 return 0
             fi
@@ -569,12 +600,31 @@ get_listen_address() {
     fi
     local v6only="0"
     v6only=$(cat /proc/sys/net/ipv6/bindv6only 2>/dev/null || echo 0)
-    if [ "$v6only" == "1" ] && [ -n "$LAST_SERVER_IP4" ]; then
-        warn "net.ipv6.bindv6only=1: '::' 只会监听 IPv6。检测到公网 IPv4，改用 0.0.0.0 (仅监听 IPv4)。"
-        echo "0.0.0.0"
-    else
-        echo "::"
+    if [ "$v6only" == "1" ]; then
+        # 本函数的返回值会被调用方以 $(...) 捕获，日志必须走 stderr 以免污染
+        warn "net.ipv6.bindv6only=1: '::' 将只监听 IPv6，无法同时服务 IPv4。" >&2
+        local adj_confirm
+        read -rp "是否临时设置 net.ipv6.bindv6only=0 以启用双栈监听? (y/N): " adj_confirm
+        if [[ "$adj_confirm" =~ ^[Yy]$ ]]; then
+            if sysctl -w net.ipv6.bindv6only=0 >/dev/null 2>&1; then
+                v6only="0"
+                success "net.ipv6.bindv6only 已临时设为 0，将启用双栈监听。" >&2
+                warn "此设置为临时修改，系统重启后会还原；如需永久生效请自行写入 /etc/sysctl.conf 或 /etc/sysctl.d/。" >&2
+            else
+                error "设置 net.ipv6.bindv6only 失败。" >&2
+            fi
+        fi
+        if [ "$v6only" == "1" ]; then
+            if [ -n "$LAST_SERVER_IP4" ]; then
+                warn "改用 0.0.0.0 (仅监听 IPv4，IPv6 客户端将无法连接)。" >&2
+                echo "0.0.0.0"
+            else
+                echo "::"
+            fi
+            return
+        fi
     fi
+    echo "::"
 }
 
 create_config_json() {
