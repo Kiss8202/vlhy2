@@ -37,11 +37,12 @@ LAST_REALITY_PORT=""
 LAST_REALITY_UUID=""
 LAST_REALITY_PUBLIC_KEY=""
 LAST_REALITY_SNI=""
-LAST_REALITY_SHORT_ID="c6c43a8c6f6b07d5"
+LAST_REALITY_SHORT_ID=""
 LAST_REALITY_FINGERPRINT="chrome"
 LAST_VLESS_LINK=""
 LAST_INSTALL_MODE=""
 LINK_IP_MODE="4"
+TEMP_REALITY_PRIVATE_KEY=""
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -70,12 +71,20 @@ is_public_ipv4() {
     [[ "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
     local a="${BASH_REMATCH[1]}" b="${BASH_REMATCH[2]}" c="${BASH_REMATCH[3]}" d="${BASH_REMATCH[4]}"
     (( a <= 255 && b <= 255 && c <= 255 && d <= 255 )) || return 1
-    [[ "$ip" == 10.* || "$ip" == 192.168.* ]] && return 1
-    if [[ "$ip" =~ ^172\.([0-9]{1,3})\..* ]]; then
-        local x="${BASH_REMATCH[1]}"
-        (( x >= 16 && x <= 31 )) && return 1
-    fi
-    [[ "$ip" == 127.* || "$ip" == 169.254.* || "$ip" == 0.* || "$ip" == 255.* ]] && return 1
+    # 排除私有/保留/特殊用途地址段
+    (( a == 0 )) && return 1                              # 0.0.0.0/8
+    (( a == 10 )) && return 1                              # 10.0.0.0/8 私网
+    (( a == 100 && b >= 64 && b <= 127 )) && return 1      # 100.64.0.0/10 CGNAT
+    (( a == 127 )) && return 1                              # 127.0.0.0/8 回环
+    (( a == 169 && b == 254 )) && return 1                  # 169.254.0.0/16 链路本地
+    (( a == 172 && b >= 16 && b <= 31 )) && return 1        # 172.16.0.0/12 私网
+    (( a == 192 && b == 0 && c == 0 )) && return 1           # 192.0.0.0/24 IETF 保留
+    (( a == 192 && b == 0 && c == 2 )) && return 1           # 192.0.2.0/24 TEST-NET-1
+    (( a == 192 && b == 168 )) && return 1                   # 192.168.0.0/16 私网
+    (( a == 198 && ( b == 18 || b == 19 ) )) && return 1     # 198.18.0.0/15 基准测试
+    (( a == 198 && b == 51 && c == 100 )) && return 1        # 198.51.100.0/24 TEST-NET-2
+    (( a == 203 && b == 0 && c == 113 )) && return 1         # 203.0.113.0/24 TEST-NET-3
+    (( a >= 224 )) && return 1                               # 224.0.0.0/3 组播/保留/广播
     return 0
 }
 
@@ -97,6 +106,7 @@ is_valid_port() {
 is_valid_domain() {
     local domain="$1"
     [[ -n "$domain" ]] || return 1
+    [[ "$domain" == *.* ]] || return 1
     [[ "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]
 }
 
@@ -105,18 +115,36 @@ format_host_for_uri() {
     if is_ipv6 "$host"; then echo "[$host]"; else echo "$host"; fi
 }
 
+is_port_in_use() {
+    local port="$1"
+    local proto="${2:-both}"
+    command -v ss &>/dev/null || return 1
+    local ss_flag="-tuln"
+    case "$proto" in
+        udp) ss_flag="-uln" ;;
+        tcp) ss_flag="-tln" ;;
+    esac
+    # 排除 sing-box 自身占用（重装/更新场景属正常），其余进程占用则视为冲突
+    ss -H $ss_flag -p 2>/dev/null | grep -E ":${port}[[:space:]]" | grep -v 'sing-box' | grep -q .
+}
+
 prompt_port() {
     local prompt_msg="$1" default_val="$2" var_name="$3"
+    local proto="${4:-both}"
     local input
     while true; do
         read -rp "${prompt_msg} (默认: ${default_val}): " input
         input="${input:-$default_val}"
-        if is_valid_port "$input"; then
-            printf -v "$var_name" '%s' "$input"
-            break
-        else
+        if ! is_valid_port "$input"; then
             warn "端口号必须是 1-65535 之间的整数。"
+            continue
         fi
+        if is_port_in_use "$input" "$proto"; then
+            warn "端口 ${input} 已被其他进程占用，请更换端口。"
+            continue
+        fi
+        printf -v "$var_name" '%s' "$input"
+        break
     done
 }
 
@@ -151,7 +179,9 @@ install_script_shortcut() {
     fi
 
     info "正在安装脚本快捷命令 sb ..."
-    cp -f "$source_script" "$target_script"
+    if [[ "$source_script" != "$target_script" ]]; then
+        cp -f "$source_script" "$target_script"
+    fi
     chmod 755 "$target_script"
     cat > "$shortcut" <<EOF
 #!/bin/bash
@@ -244,11 +274,12 @@ attempt_install_package() {
 
     info "正在尝试安装 '${friendly_name}'..."
     if command -v apt-get &>/dev/null; then
-        apt-get update -y && apt-get install -y "$package_name"
+        apt-get update -y >/dev/null 2>&1 || warn "apt-get update 失败，继续尝试安装 '${friendly_name}'..."
+        apt-get install -y "$package_name" || return 1
     elif command -v yum &>/dev/null; then
-        yum install -y "$package_name"
+        yum install -y "$package_name" || return 1
     elif command -v dnf &>/dev/null; then
-        dnf install -y "$package_name"
+        dnf install -y "$package_name" || return 1
     else
         error "未找到已知的包管理器 (apt, yum, dnf)。请手动安装 '${friendly_name}'。"
         return 1
@@ -316,13 +347,13 @@ get_server_ips() {
 
     if command -v ip &>/dev/null; then
         local v4_ips v6_ips
-        v4_ips=$(ip -4 addr show 2>/dev/null | grep -oP '(?<=inet\s)[0-9]+(\.[0-9]+){3}' || true)
+        v4_ips=$(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 || true)
         for ip in $v4_ips; do
             if is_public_ipv4 "$ip" && [ -z "$LAST_SERVER_IP4" ]; then
                 LAST_SERVER_IP4="$ip"
             fi
         done
-        v6_ips=$(ip -6 addr show 2>/dev/null | grep -oP '(?<=inet6\s)[0-9a-fA-F:]+' || true)
+        v6_ips=$(ip -o -6 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 || true)
         for ip in $v6_ips; do
             if is_public_ipv6 "$ip" && [ -z "$LAST_SERVER_IP6" ]; then
                 LAST_SERVER_IP6="$ip"
@@ -392,7 +423,8 @@ choose_link_ip_mode() {
 }
 
 generate_random_password() {
-    openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c 16
+    # 16 位十六进制字符（64bit 熵），无管道截断、URI 安全
+    openssl rand -hex 8
 }
 
 install_singbox_core() {
@@ -416,19 +448,20 @@ install_singbox_core() {
     fi
 
     info "正在安装/更新 Sing-box (beta)..."
-    local install_script_url="https://sing-box.vercel.app/"
+    # 官方安装脚本（sing-box.app 为官方域名），避免第三方托管被替换的供应链风险
+    local install_script_url="https://sing-box.app/install.sh"
     local tmp_script
     tmp_script=$(mktemp)
+    # 函数返回或脚本退出（含 Ctrl+C）时清理临时文件
+    trap 'rm -f "$tmp_script"' RETURN EXIT
 
-    if ! curl -fsSL --proto '=https' --tlsv1.2 "$install_script_url" -o "$tmp_script"; then
+    if ! curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 60 "$install_script_url" -o "$tmp_script"; then
         error "下载 Sing-box 安装脚本失败。"
-        rm -f "$tmp_script"
         return 1
     fi
 
     info "安装脚本已下载到: $tmp_script，开始执行..."
-    if bash "$tmp_script" install --beta; then
-        rm -f "$tmp_script"
+    if bash "$tmp_script" --beta; then
         success "Sing-box 安装/更新成功。"
         find_and_set_singbox_cmd
         if [ -z "$SINGBOX_CMD" ]; then
@@ -436,7 +469,6 @@ install_singbox_core() {
             return 1
         fi
     else
-        rm -f "$tmp_script"
         error "Sing-box 安装失败。"
         return 1
     fi
@@ -450,8 +482,11 @@ generate_self_signed_cert() {
         local existing_cn
         existing_cn=$(openssl x509 -in "$HYSTERIA_CERT_PEM" -noout -subject | sed -n 's/.*CN = \([^,]*\).*/\1/p' || true)
         if [ "$existing_cn" == "$domain_cn" ]; then
-            info "证书 CN ($existing_cn) 与目标 ($domain_cn) 匹配，跳过重新生成。"
-            return 0
+            if openssl x509 -in "$HYSTERIA_CERT_PEM" -noout -text 2>/dev/null | grep -q "Subject Alternative Name"; then
+                info "证书 CN ($existing_cn) 与目标 ($domain_cn) 匹配，跳过重新生成。"
+                return 0
+            fi
+            warn "现有证书缺少 SAN 扩展，将重新生成以兼容现代 TLS 客户端。"
         else
             warn "证书 CN ($existing_cn) 与目标 ($domain_cn) 不匹配。"
             local regen_cert_choice
@@ -467,7 +502,12 @@ generate_self_signed_cert() {
     mkdir -p "$HYSTERIA_CERT_DIR"
     openssl ecparam -genkey -name prime256v1 -out "$HYSTERIA_CERT_KEY"
     chmod 600 "$HYSTERIA_CERT_KEY"
-    openssl req -new -x509 -days 3650 -key "$HYSTERIA_CERT_KEY" -out "$HYSTERIA_CERT_PEM" -subj "/CN=${domain_cn}"
+    # 现代客户端只认 SAN；OpenSSL < 1.1.1 不支持 -addext 时回退为仅 CN
+    if ! openssl req -new -x509 -days 3650 -key "$HYSTERIA_CERT_KEY" -out "$HYSTERIA_CERT_PEM" \
+        -subj "/CN=${domain_cn}" -addext "subjectAltName=DNS:${domain_cn}" 2>/dev/null; then
+        warn "当前 OpenSSL 不支持 -addext，回退为仅含 CN 的证书..."
+        openssl req -new -x509 -days 3650 -key "$HYSTERIA_CERT_KEY" -out "$HYSTERIA_CERT_PEM" -subj "/CN=${domain_cn}"
+    fi
     chmod 600 "$HYSTERIA_CERT_PEM"
     success "自签名证书生成成功。"
     info "证书: ${HYSTERIA_CERT_PEM}"
@@ -496,6 +536,10 @@ generate_reality_credentials() {
     info "生成的 UUID: $reality_uuid_val"
     LAST_REALITY_UUID="$reality_uuid_val"
 
+    # 每台服务器随机生成 short_id，避免共用固定值带来的指纹特征
+    LAST_REALITY_SHORT_ID=$(openssl rand -hex 8)
+    info "生成的 Reality Short ID: $LAST_REALITY_SHORT_ID"
+
     key_pair_output=$($SINGBOX_CMD generate reality-keypair)
     if [ -z "$key_pair_output" ]; then
         error "生成 Reality keypair 失败或输出为空。"
@@ -517,6 +561,22 @@ generate_reality_credentials() {
     LAST_REALITY_PUBLIC_KEY="$reality_public_key_val"
 }
 
+get_listen_address() {
+    # IPv6 被禁用的系统只能监听 IPv4
+    if [ ! -f /proc/net/if_inet6 ]; then
+        echo "0.0.0.0"
+        return
+    fi
+    local v6only="0"
+    v6only=$(cat /proc/sys/net/ipv6/bindv6only 2>/dev/null || echo 0)
+    if [ "$v6only" == "1" ] && [ -n "$LAST_SERVER_IP4" ]; then
+        warn "net.ipv6.bindv6only=1: '::' 只会监听 IPv6。检测到公网 IPv4，改用 0.0.0.0 (仅监听 IPv4)。"
+        echo "0.0.0.0"
+    else
+        echo "::"
+    fi
+}
+
 create_config_json() {
     local mode="$1"
     local hy2_port="$2"
@@ -536,6 +596,9 @@ create_config_json() {
     mkdir -p "$SINGBOX_CONFIG_DIR"
     chmod 700 "$SINGBOX_CONFIG_DIR"
 
+    local listen_addr
+    listen_addr=$(get_listen_address)
+
     local inbounds_json="[]"
 
     if [ "$mode" == "all" ] || [ "$mode" == "hysteria2" ]; then
@@ -545,10 +608,11 @@ create_config_json() {
             --arg cert "$HYSTERIA_CERT_PEM" \
             --arg key "$HYSTERIA_CERT_KEY" \
             --arg sni "$hy2_masquerade_cn" \
+            --arg listen "$listen_addr" \
             '. + [{
                 type: "hysteria2",
                 tag: "hy2-in",
-                listen: "::",
+                listen: $listen,
                 listen_port: $port,
                 users: [{password: $password}],
                 masquerade: $masquerade,
@@ -570,10 +634,11 @@ create_config_json() {
             --arg sni "$reality_sni" \
             --arg private_key "$reality_private_key" \
             --arg short_id "$LAST_REALITY_SHORT_ID" \
+            --arg listen "$listen_addr" \
             '. + [{
                 type: "vless",
                 tag: "vless-in",
-                listen: "::",
+                listen: $listen,
                 listen_port: $port,
                 users: [{uuid: $uuid, flow: "xtls-rprx-vision"}],
                 tls: {
@@ -595,8 +660,7 @@ create_config_json() {
         outbounds: [
             {type: "direct", tag: "direct"},
             {type: "block", tag: "block"}
-        ],
-        route: {rules: [{protocol: "dns", outbound: "direct"}]}
+        ]
     }' > "$SINGBOX_CONFIG_FILE"
 
     chmod 600 "$SINGBOX_CONFIG_FILE"
@@ -672,13 +736,13 @@ display_and_store_config_info() {
         local ip="$1"
         local h
         h=$(format_host_for_uri "$ip")
-        echo "hy2://${LAST_HY2_PASSWORD}@${h}:${LAST_HY2_PORT}?sni=${LAST_HY2_MASQUERADE_CN}&alpn=h3&insecure=1#Hy2-${ip}-$(date +%s)"
+        echo "hy2://${LAST_HY2_PASSWORD}@${h}:${LAST_HY2_PORT}?sni=${LAST_HY2_MASQUERADE_CN}&alpn=h3&insecure=1#Hy2-${ip}"
     }
     gen_vless_link() {
         local ip="$1"
         local h
         h=$(format_host_for_uri "$ip")
-        echo "vless://${LAST_REALITY_UUID}@${h}:${LAST_REALITY_PORT}?security=reality&sni=${LAST_REALITY_SNI}&fp=${LAST_REALITY_FINGERPRINT}&pbk=${LAST_REALITY_PUBLIC_KEY}&sid=${LAST_REALITY_SHORT_ID}&flow=xtls-rprx-vision&type=tcp#Reality-${ip}-$(date +%s)"
+        echo "vless://${LAST_REALITY_UUID}@${h}:${LAST_REALITY_PORT}?security=reality&sni=${LAST_REALITY_SNI}&fp=${LAST_REALITY_FINGERPRINT}&pbk=${LAST_REALITY_PUBLIC_KEY}&sid=${LAST_REALITY_SHORT_ID}&flow=xtls-rprx-vision&type=tcp#Reality-${ip}"
     }
 
     echo -e "----------------------------------------------------"
@@ -743,10 +807,10 @@ install_hysteria2_reality() {
     get_server_ips
     choose_link_ip_mode
 
-    prompt_port "请输入 Hysteria2 监听端口" "$DEFAULT_HYSTERIA_PORT" LAST_HY2_PORT
+    prompt_port "请输入 Hysteria2 监听端口" "$DEFAULT_HYSTERIA_PORT" LAST_HY2_PORT udp
     prompt_domain "请输入 Hysteria2 伪装域名/证书CN" "$DEFAULT_HYSTERIA_MASQUERADE_CN" LAST_HY2_MASQUERADE_CN
 
-    prompt_port "请输入 Reality (VLESS) 监听端口" "$DEFAULT_REALITY_PORT" LAST_REALITY_PORT
+    prompt_port "请输入 Reality (VLESS) 监听端口" "$DEFAULT_REALITY_PORT" LAST_REALITY_PORT tcp
     prompt_domain "请输入 Reality 目标SNI/握手服务器" "$DEFAULT_REALITY_SNI" LAST_REALITY_SNI
 
     LAST_HY2_PASSWORD=$(generate_random_password)
@@ -774,7 +838,7 @@ install_hysteria2_only() {
     get_server_ips
     choose_link_ip_mode
 
-    prompt_port "请输入 Hysteria2 监听端口" "$DEFAULT_HYSTERIA_PORT" LAST_HY2_PORT
+    prompt_port "请输入 Hysteria2 监听端口" "$DEFAULT_HYSTERIA_PORT" LAST_HY2_PORT udp
     prompt_domain "请输入 Hysteria2 伪装域名/证书CN" "$DEFAULT_HYSTERIA_MASQUERADE_CN" LAST_HY2_MASQUERADE_CN
 
     LAST_HY2_PASSWORD=$(generate_random_password)
@@ -786,6 +850,7 @@ install_hysteria2_only() {
     LAST_REALITY_UUID=""
     LAST_REALITY_PUBLIC_KEY=""
     LAST_REALITY_SNI=""
+    LAST_REALITY_SHORT_ID=""
     LAST_VLESS_LINK=""
 
     create_config_json "hysteria2" \
@@ -807,7 +872,7 @@ install_reality_only() {
     get_server_ips
     choose_link_ip_mode
 
-    prompt_port "请输入 Reality (VLESS) 监听端口" "$DEFAULT_REALITY_PORT" LAST_REALITY_PORT
+    prompt_port "请输入 Reality (VLESS) 监听端口" "$DEFAULT_REALITY_PORT" LAST_REALITY_PORT tcp
     prompt_domain "请输入 Reality 目标SNI/握手服务器" "$DEFAULT_REALITY_SNI" LAST_REALITY_SNI
 
     generate_reality_credentials || return 1
@@ -901,6 +966,14 @@ uninstall_singbox() {
         fi
     else
         info "Hysteria2 证书目录 (${HYSTERIA_CERT_DIR}) 已保留。"
+    fi
+
+    read -rp "是否删除脚本快捷命令 (sb) 与脚本文件 (/usr/local/bin/install.sh)? (y/N): " delete_script_confirm
+    if [[ "$delete_script_confirm" =~ ^[Yy]$ ]]; then
+        rm -f /usr/local/bin/sb /usr/local/bin/install.sh
+        info "已删除 sb 快捷命令与 install.sh 脚本文件。"
+    else
+        info "sb 快捷命令与 install.sh 脚本文件已保留。"
     fi
 
     success "Sing-box 卸载完成。"
@@ -999,11 +1072,11 @@ show_menu() {
     echo "  9. 查看当前配置文件"
     echo "  10. 编辑当前配置文件 (nano/vim)"
     echo "  11. 显示上次保存的导入信息 (含二维码)"
-    echo "  14. 切换导入链接使用的 IP（IPv4 / IPv6 / 同时）"
+    echo "  12. 切换导入链接使用的 IP（IPv4 / IPv6 / 同时）"
     echo "------------------------------------------------"
     echo -e "${RED}${BOLD}其他选项:${NC}"
-    echo "  12. 更新 Sing-box 内核 (使用官方beta脚本)"
-    echo "  13. 卸载 Sing-box"
+    echo "  13. 更新 Sing-box 内核 (使用官方beta脚本)"
+    echo "  14. 卸载 Sing-box"
     echo "  0.  退出脚本"
     echo "================================================"
     local choice
@@ -1021,9 +1094,9 @@ show_menu() {
         9) manage_singbox "view_config" ;;
         10) manage_singbox "edit_config" ;;
         11) show_current_import_info ;;
-        12) install_singbox_core && manage_singbox "restart" ;;
-        13) uninstall_singbox ;;
-        14) get_server_ips; choose_link_ip_mode; save_persistent_info ;;
+        12) get_server_ips; choose_link_ip_mode; save_persistent_info ;;
+        13) install_singbox_core && manage_singbox "restart" ;;
+        14) uninstall_singbox ;;
         0) exit 0 ;;
         *) error "无效选项，请输入 0 到 14 之间的数字。" ;;
     esac
@@ -1038,5 +1111,6 @@ load_persistent_info
 
 while true; do
     show_menu
-    read -n 1 -s -r -p "按任意键返回主菜单 (或按 Ctrl+C 退出)..."
+    # 保留此暂停：若去掉，show_menu 开头的 clear 会立即清掉操作输出
+    read -n 1 -s -r -p "按任意键返回主菜单..."
 done
