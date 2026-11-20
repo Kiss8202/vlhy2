@@ -1369,9 +1369,9 @@ show_menu() {
     print_header
 
     echo -e "${GREEN}${BOLD}安装选项:${NC}"
-    echo "  1. 安装 Hysteria2 + Reality (共存)"
-    echo "  2. 单独安装 Hysteria2"
-    echo "  3. 单独安装 Reality (VLESS)"
+    echo "  1. 安装 Hysteria2 + Reality "
+    echo "  2. 安装 Hysteria2"
+    echo "  3. 安装 Reality (VLESS)"
     echo "------------------------------------------------"
     echo -e "${YELLOW}${BOLD}管理选项:${NC}"
     echo "  4. 启动 Sing-box 服务"
