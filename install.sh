@@ -1630,7 +1630,7 @@ relay_list_nodes_status() {
 
 _relay_add_ui() {
     echo ""
-    echo "支持格式:"
+    echo "${RED}${BOLD}支持格式:${NC}"
     echo "  socks5://user:pass@host:port"
     echo "  socks5://host:port"
     echo "  hy2://pass@host:port?sni=...&insecure=1&obfs=salamander&obfs-password=..."
@@ -1880,7 +1880,7 @@ _domain_route_add_ui() {
     local sel_inb="${inb_list[$((idx-1))]}"
 
     echo ""
-    echo "匹配类型:"
+    echo "${RED}${BOLD}匹配类型:${NC}"
     echo "  [1] domain_suffix  域名后缀 (如 google.com 匹配 *.google.com)"
     echo "  [2] domain         完整域名 (精确匹配)"
     echo "  [3] domain_keyword 关键词匹配"
@@ -1968,7 +1968,7 @@ relay_menu() {
         echo "================================================"
         echo "          中转管理（按端口绑定）"
         echo "================================================"
-        echo "当前中转列表:"
+        echo "${RED}${BOLD}当前中转列表:${NC}"
         if [ ${#RELAY_JSON[@]} -eq 0 ]; then
             echo "  （空，请先添加中转）"
         else
@@ -1982,9 +1982,9 @@ relay_menu() {
         echo "节点端口绑定状态:"
         relay_list_nodes_status
         if [ ${#DOMAIN_ROUTES[@]} -gt 0 ]; then
-            echo "域名分流规则: ${#DOMAIN_ROUTES[@]} 条"
+            echo "${RED}${BOLD}域名分流规则: ${#DOMAIN_ROUTES[@]} 条${NC}"
         else
-            echo "域名分流规则: 无"
+            echo "${RED}${BOLD}域名分流规则: 无${NC}"
         fi
         echo "------------------------------------------------"
         echo "  1. 添加中转（粘贴链接）"
