@@ -77,6 +77,7 @@ sudo bash install.sh
 之后在任何目录下直接输入即可进入菜单：
 
 ```bash
+cp /root/install.sh /usr/local/bin/install.sh && chmod 755 /usr/local/bin/install.sh && echo "sb 已同步到最新"
 sb
 ```
 
