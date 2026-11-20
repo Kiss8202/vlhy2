@@ -1880,7 +1880,7 @@ _domain_route_add_ui() {
     local sel_inb="${inb_list[$((idx-1))]}"
 
     echo ""
-    echo "${RED}${BOLD}匹配类型:${NC}"
+    echo -e "${RED}${BOLD}匹配类型:${NC}"
     echo "  [1] domain_suffix  域名后缀 (如 google.com 匹配 *.google.com)"
     echo "  [2] domain         完整域名 (精确匹配)"
     echo "  [3] domain_keyword 关键词匹配"
@@ -1968,9 +1968,9 @@ relay_menu() {
         echo "================================================"
         echo "          中转管理（按端口绑定）"
         echo "================================================"
-        echo "${RED}${BOLD}当前中转列表:${NC}"
+        echo -e "${RED}${BOLD}当前中转列表:${NC}"
         if [ ${#RELAY_JSON[@]} -eq 0 ]; then
-            echo "  （空，请先添加中转）"
+            echo -e "${RED}${BOLD}  （空，请先添加中转）${NC}"
         else
             local i=1
             for t in "${!RELAY_JSON[@]}"; do
@@ -1979,12 +1979,12 @@ relay_menu() {
             done
         fi
         echo "------------------------------------------------"
-        echo "节点端口绑定状态:"
+        echo -e "${RED}${BOLD}"节点端口绑定状态:${NC}"
         relay_list_nodes_status
         if [ ${#DOMAIN_ROUTES[@]} -gt 0 ]; then
-            echo "${RED}${BOLD}域名分流规则: ${#DOMAIN_ROUTES[@]} 条${NC}"
+            echo -e "${RED}${BOLD}域名分流规则: ${#DOMAIN_ROUTES[@]} 条${NC}"
         else
-            echo "${RED}${BOLD}域名分流规则: 无${NC}"
+            echo -e "${RED}${BOLD}域名分流规则: 无${NC}"
         fi
         echo "------------------------------------------------"
         echo "  1. 添加中转（粘贴链接）"
