@@ -2054,7 +2054,7 @@ io_mode_menu() {
     while true; do
         clear
         echo "================================================"
-        echo "          出站 IP 模式"
+        echo -e "${CYAN}${BOLD}          出站 IP 模式${NC}"
         echo "================================================"
         echo "  当前出站: $(_io_mode_label "$OUTBOUND_MODE")"
         echo "  服务器 IP: v4=${LAST_SERVER_IP4:-无}  v6=${LAST_SERVER_IP6:-无}"
