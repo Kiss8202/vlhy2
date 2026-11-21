@@ -1,20 +1,20 @@
-bash << 'VLESS_ONE_EOF'
+bash << 'MULTI_OS_EOF'
 set -e
 
 SCRIPT_PATH="/root/install.sh"
 [ -f "$SCRIPT_PATH" ] || { echo "[ERROR] 脚本不存在: $SCRIPT_PATH"; exit 1; }
-BACKUP="${SCRIPT_PATH}.bak.vless1.$(date +%Y%m%d_%H%M%S)"
-cp -a "$SCRIPT_PATH" "$BACKUP"
-echo "[INFO] 已备份: $BACKUP"
+cp -a "$SCRIPT_PATH" "${SCRIPT_PATH}.bak.multios.$(date +%Y%m%d_%H%M%S)"
+echo "[INFO] 已备份"
 
 python3 << 'PY_EOF'
+import re
 import sys
 path = "/root/install.sh"
 with open(path, "r", encoding="utf-8") as f:
     content = f.read()
 
-if 'NODE_VLESS_TLS_UUID' in content:
-    print("[WARN] 已有 VLESS 分支补丁，跳过"); sys.exit(0)
+if 'detect_system()' in content and 'svc_restart()' in content:
+    print("[WARN] 已存在兼容层，跳过"); sys.exit(0)
 
 def rep(old, new, tag):
     global content
@@ -22,711 +22,339 @@ def rep(old, new, tag):
         print(f"[ERROR] 未找到: {tag}"); sys.exit(1)
     content = content.replace(old, new, 1)
 
-# ===== 1. 变量声明 =====
-rep(
-'''RELAY_FILE="${SINGBOX_CONFIG_DIR}/relays.conf"
-declare -a DOMAIN_ROUTES=()''',
-'''RELAY_FILE="${SINGBOX_CONFIG_DIR}/relays.conf"
-declare -a DOMAIN_ROUTES=()
+# ===== 1. 插入兼容层（在 attempt_install_package 之前） =====
+compat_block = '''# ==================== 系统兼容层（Debian / Alpine） ====================
+OS_TYPE=""
+INIT_SYSTEM=""
+PKG_MGR=""
 
-# VLESS + TLS 节点
-declare -A NODE_VLESS_TLS_UUID=()
-declare -A NODE_VLESS_TLS_TYPE=()
-declare -A NODE_VLESS_TLS_SNI=()
-declare -A NODE_VLESS_TLS_PATH=()
-declare -A NODE_VLESS_TLS_SVC=()
-declare -A NODE_VLESS_TLS_RELAY=()
-VLESS_TLS_CERT_DIR="/etc/sing-box/vless-tls"
-VLESS_TLS_CERT_PEM="${VLESS_TLS_CERT_DIR}/cert.pem"
-VLESS_TLS_CERT_KEY="${VLESS_TLS_CERT_DIR}/private.key"''',
-'变量声明')
-
-# ===== 2. load_persistent_info =====
-rep(
-'''                    FP) NODE_REALITY_FP["$port2"]="$value" ;;
-                esac
-                ;;
-        esac''',
-'''                    FP) NODE_REALITY_FP["$port2"]="$value" ;;
-                esac
-                ;;
-            NODE_VLESS_TLS_*)
-                local rest3="${key#NODE_VLESS_TLS_}"
-                local port3="${rest3%%_*}"
-                local field3="${rest3#*_}"
-                case "$field3" in
-                    UUID) NODE_VLESS_TLS_UUID["$port3"]="$value" ;;
-                    TYPE) NODE_VLESS_TLS_TYPE["$port3"]="$value" ;;
-                    SNI) NODE_VLESS_TLS_SNI["$port3"]="$value" ;;
-                    PATH) NODE_VLESS_TLS_PATH["$port3"]="$value" ;;
-                    SVC) NODE_VLESS_TLS_SVC["$port3"]="$value" ;;
-                esac
-                ;;
-        esac''',
-'load_persistent_info')
-
-# ===== 3. save_persistent_info =====
-rep(
-'''        echo "NODE_REALITY_${p}_FP=\\"${NODE_REALITY_FP[$p]:-chrome}\\""
-    done >> "$PERSISTENT_INFO_FILE"
-
-    chmod 600 "$PERSISTENT_INFO_FILE"''',
-'''        echo "NODE_REALITY_${p}_FP=\\"${NODE_REALITY_FP[$p]:-chrome}\\""
-    done >> "$PERSISTENT_INFO_FILE"
-    for p in "${!NODE_VLESS_TLS_UUID[@]}"; do
-        echo "NODE_VLESS_TLS_${p}_UUID=\\"${NODE_VLESS_TLS_UUID[$p]}\\""
-        echo "NODE_VLESS_TLS_${p}_TYPE=\\"${NODE_VLESS_TLS_TYPE[$p]:-ws}\\""
-        echo "NODE_VLESS_TLS_${p}_SNI=\\"${NODE_VLESS_TLS_SNI[$p]:-}\\""
-        echo "NODE_VLESS_TLS_${p}_PATH=\\"${NODE_VLESS_TLS_PATH[$p]:-}\\""
-        echo "NODE_VLESS_TLS_${p}_SVC=\\"${NODE_VLESS_TLS_SVC[$p]:-}\\""
-    done >> "$PERSISTENT_INFO_FILE"
-
-    chmod 600 "$PERSISTENT_INFO_FILE"''',
-'save_persistent_info')
-
-# ===== 4. generate_vless_tls_cert =====
-rep(
-'''get_listen_address() {
-    # 入站固定双栈监听，客户端按需选择 v4 或 v6 链接''',
-'''generate_vless_tls_cert() {
-    local domain_cn="$1"
-    if [ -f "$VLESS_TLS_CERT_PEM" ] && [ -f "$VLESS_TLS_CERT_KEY" ]; then
-        local existing_cn
-        existing_cn=$(openssl x509 -in "$VLESS_TLS_CERT_PEM" -noout -subject 2>/dev/null | sed -n 's/.*CN[[:space:]]*=[[:space:]]*\\([^,]*\\).*/\\1/p' || true)
-        if [ "$existing_cn" == "$domain_cn" ]; then
-            info "VLESS+TLS 证书 CN 匹配，复用现有证书。"
-            return 0
+detect_system() {
+    if [ -f /etc/alpine-release ]; then
+        OS_TYPE="alpine"; INIT_SYSTEM="openrc"; PKG_MGR="apk"
+    elif command -v systemctl &>/dev/null && [ -d /run/systemd/system ]; then
+        OS_TYPE="systemd"; INIT_SYSTEM="systemd"
+        if command -v apt-get &>/dev/null; then PKG_MGR="apt"
+        elif command -v dnf &>/dev/null; then PKG_MGR="dnf"
+        elif command -v yum &>/dev/null; then PKG_MGR="yum"
         fi
-        warn "VLESS+TLS 证书 CN ($existing_cn) 与目标 ($domain_cn) 不匹配，重新生成。"
+    else
+        error "不支持的初始化系统（需 systemd 或 OpenRC）"
+        exit 1
     fi
-    info "生成 VLESS+TLS 自签证书 (CN=${domain_cn})..."
-    mkdir -p "$VLESS_TLS_CERT_DIR"
-    chmod 700 "$VLESS_TLS_CERT_DIR"
-    openssl ecparam -genkey -name prime256v1 -out "$VLESS_TLS_CERT_KEY"
-    chmod 600 "$VLESS_TLS_CERT_KEY"
-    if ! openssl req -new -x509 -days 3650 -key "$VLESS_TLS_CERT_KEY" -out "$VLESS_TLS_CERT_PEM" \\
-        -subj "/CN=${domain_cn}" -addext "subjectAltName=DNS:${domain_cn}" 2>/dev/null; then
-        warn "当前 OpenSSL 不支持 -addext，回退为仅含 CN 的证书..."
-        openssl req -new -x509 -days 3650 -key "$VLESS_TLS_CERT_KEY" -out "$VLESS_TLS_CERT_PEM" -subj "/CN=${domain_cn}"
+
+    if [ "$OS_TYPE" == "alpine" ]; then
+        local need_install=()
+        command -v bash   &>/dev/null || need_install+=("bash")
+        command -v curl   &>/dev/null || need_install+=("curl")
+        command -v jq     &>/dev/null || need_install+=("jq")
+        command -v openssl &>/dev/null || need_install+=("openssl")
+        command -v ip     &>/dev/null || need_install+=("iproute2")
+        [ -f /etc/ssl/certs/ca-certificates.crt ] || need_install+=("ca-certificates")
+        if [ ${#need_install[@]} -gt 0 ]; then
+            info "Alpine 基础依赖安装: ${need_install[*]}"
+            apk add --no-cache "${need_install[@]}" 2>/dev/null || \\
+                apk add --no-cache bash curl jq openssl ca-certificates iproute2
+        fi
     fi
-    chmod 600 "$VLESS_TLS_CERT_PEM"
-    success "VLESS+TLS 自签证书生成成功。"
-    info "证书: ${VLESS_TLS_CERT_PEM}"
-    info "私钥: ${VLESS_TLS_CERT_KEY}"
+    info "系统: $OS_TYPE | 包管理器: $PKG_MGR | 初始化: $INIT_SYSTEM"
 }
 
-get_listen_address() {
-    # 入站固定双栈监听，客户端按需选择 v4 或 v6 链接''',
-'generate_vless_tls_cert')
-
-# ===== 5. create_config_json 签名扩展 =====
-rep(
-'''    local reality_private_key="$7"
-    local reality_sni="$8"
-
-    if [ -z "$SINGBOX_CMD" ]; then
-        error "Sing-box command (SINGBOX_CMD) 未设置。无法校验或格式化配置文件。"
-        return 1
-    fi''',
-'''    local reality_private_key="$7"
-    local reality_sni="$8"
-    local vtls_port="${9:-}"
-    local vtls_uuid="${10:-}"
-    local vtls_transport="${11:-}"
-    local vtls_sni="${12:-}"
-    local vtls_path="${13:-}"
-    local vtls_svc="${14:-}"
-
-    if [ -z "$SINGBOX_CMD" ]; then
-        error "Sing-box command (SINGBOX_CMD) 未设置。无法校验或格式化配置文件。"
-        return 1
-    fi''',
-'create_config_json 签名')
-
-# ===== 6. create_config_json vless_tls 分支 =====
-rep(
-'''    local _direct_ob
-    case "${OUTBOUND_MODE:-both}" in
-        v4) _direct_ob='{"type":"direct","tag":"direct","domain_resolver":{"server":"local","strategy":"ipv4_only"}}' ;;
-        v6) _direct_ob='{"type":"direct","tag":"direct","domain_resolver":{"server":"local","strategy":"ipv6_only"}}' ;;
-        *)  _direct_ob='{"type":"direct","tag":"direct"}' ;;
-    esac
-    local _ob="[${_direct_ob},{\\"type\\":\\"block\\",\\"tag\\":\\"block\\"}]"''',
-'''    if [ "$mode" == "vless_tls" ]; then
-        local vtls_tag="vless-tls-in-${vtls_port}"
-        existing_inbounds=$(jq --arg tag "$vtls_tag" 'map(select(.tag != $tag))' <<< "$existing_inbounds")
-        existing_inbounds=$(jq --argjson port "$vtls_port" \\
-            --arg uuid "$vtls_uuid" \\
-            --arg sni "$vtls_sni" \\
-            --arg cert "$VLESS_TLS_CERT_PEM" \\
-            --arg key "$VLESS_TLS_CERT_KEY" \\
-            --arg tag "$vtls_tag" \\
-            --arg listen "$listen_addr" \\
-            --arg ttype "$vtls_transport" \\
-            --arg tpath "$vtls_path" \\
-            --arg tsvc "$vtls_svc" \\
-            '. + [(
-                {
-                    type: "vless",
-                    tag: $tag,
-                    listen: $listen,
-                    listen_port: $port,
-                    users: [{uuid: $uuid}],
-                    tls: {
-                        enabled: true,
-                        server_name: $sni,
-                        certificate_path: $cert,
-                        key_path: $key,
-                        alpn: ["h2", "http/1.1"]
-                    }
-                }
-                + (if $ttype == "ws" then
-                    {transport: {type: "ws", path: $tpath}}
-                   elif $ttype == "httpupgrade" then
-                    {transport: {type: "httpupgrade", path: $tpath}}
-                   elif $ttype == "grpc" then
-                    {transport: {type: "grpc", service_name: $tsvc}}
-                   else {} end)
-            )]' <<< "$existing_inbounds")
+svc_start()   { if [ "$INIT_SYSTEM" == "openrc" ]; then rc-service sing-box start;   else systemctl start sing-box;   fi; }
+svc_stop()    { if [ "$INIT_SYSTEM" == "openrc" ]; then rc-service sing-box stop;    else systemctl stop sing-box;    fi; }
+svc_restart() { if [ "$INIT_SYSTEM" == "openrc" ]; then rc-service sing-box restart; else systemctl restart sing-box; fi; }
+svc_status()  { if [ "$INIT_SYSTEM" == "openrc" ]; then rc-service sing-box status;  else systemctl status sing-box --no-pager -l; fi; }
+svc_is_active() {
+    if [ "$INIT_SYSTEM" == "openrc" ]; then
+        rc-service sing-box status &>/dev/null
+    else
+        systemctl is-active --quiet sing-box
     fi
-
-    local _direct_ob
-    case "${OUTBOUND_MODE:-both}" in
-        v4) _direct_ob='{"type":"direct","tag":"direct","domain_resolver":{"server":"local","strategy":"ipv4_only"}}' ;;
-        v6) _direct_ob='{"type":"direct","tag":"direct","domain_resolver":{"server":"local","strategy":"ipv6_only"}}' ;;
-        *)  _direct_ob='{"type":"direct","tag":"direct"}' ;;
-    esac
-    local _ob="[${_direct_ob},{\\"type\\":\\"block\\",\\"tag\\":\\"block\\"}]"''',
-'create_config_json vless_tls 分支')
-
-# ===== 7. display_and_store_config_info gen_vless_tls_link =====
-rep(
-'''        echo "vless://${uuid}@${h}:${port}?security=reality&sni=${sni}&fp=${fp}&pbk=${pub}&sid=${sid}&flow=xtls-rprx-vision&type=tcp#Reality-${port}-${ip}"
-    }
-
-    if [[ "$mode" == "all" || "$mode" == "hysteria2" ]]; then''',
-'''        echo "vless://${uuid}@${h}:${port}?security=reality&sni=${sni}&fp=${fp}&pbk=${pub}&sid=${sid}&flow=xtls-rprx-vision&type=tcp#Reality-${port}-${ip}"
-    }
-    gen_vless_tls_link() {
-        local port="$1"
-        local ip="$2"
-        local uuid="${NODE_VLESS_TLS_UUID[$port]}"
-        local tp="${NODE_VLESS_TLS_TYPE[$port]}"
-        local sni="${NODE_VLESS_TLS_SNI[$port]}"
-        local path="${NODE_VLESS_TLS_PATH[$port]:-}"
-        local svc="${NODE_VLESS_TLS_SVC[$port]:-}"
-        local h
-        h=$(format_host_for_uri "$ip")
-        local link="vless://${uuid}@${h}:${port}?security=tls&sni=${sni}&fp=chrome&allowInsecure=1&type=${tp}"
-        if [[ "$tp" == "ws" || "$tp" == "httpupgrade" ]]; then
-            link="${link}&path=${path}&host=${sni}"
-        elif [[ "$tp" == "grpc" ]]; then
-            link="${link}&serviceName=${svc}"
-        fi
-        echo "${link}#VLESS-TLS-${port}-${ip}"
-    }
-
-    if [[ "$mode" == "all" || "$mode" == "hysteria2" ]]; then''',
-'display_and_store_config_info gen_vless_tls_link')
-
-# ===== 8. display_and_store_config_info vless_tls 显示块 =====
-rep(
-'''    save_persistent_info
+}
+svc_enable()  { if [ "$INIT_SYSTEM" == "openrc" ]; then rc-update add sing-box default &>/dev/null; else systemctl enable sing-box &>/dev/null; fi; }
+svc_disable() { if [ "$INIT_SYSTEM" == "openrc" ]; then rc-update del sing-box default &>/dev/null; else systemctl disable sing-box &>/dev/null; fi; }
+svc_daemon_reload() { if [ "$INIT_SYSTEM" == "openrc" ]; then true; else systemctl daemon-reload; fi; }
+svc_log_tail() {
+    local n="${1:-20}"
+    if [ "$INIT_SYSTEM" == "openrc" ]; then
+        logread 2>/dev/null | grep -i sing-box | tail -n "$n" || \\
+            tail -n "$n" /var/log/messages 2>/dev/null || true
+    else
+        journalctl -u sing-box -n "$n" --no-pager
+    fi
+}
+svc_log_follow() {
+    local n="${1:-50}"
+    if [ "$INIT_SYSTEM" == "openrc" ]; then
+        logread -f 2>/dev/null || tail -f /var/log/messages
+    else
+        journalctl -u sing-box -f --no-pager -n "$n"
+    fi
 }
 
-# --- Installation functions ---
-install_hysteria2_reality() {''',
-'''    if [[ "$mode" == "all" || "$mode" == "vless_tls" ]]; then
-        local p
-        for p in "${!NODE_VLESS_TLS_UUID[@]}"; do
-            local tp="${NODE_VLESS_TLS_TYPE[$p]:-ws}"
-            echo -e "----------------------------------------------------"
-            echo -e "${GREEN}${BOLD} VLESS+TLS (端口 ${p}, ${tp}) 配置信息:${NC}"
-            echo -e "UUID: ${GREEN}${NODE_VLESS_TLS_UUID[$p]}${NC}"
-            echo -e "SNI: ${GREEN}${NODE_VLESS_TLS_SNI[$p]:-}${NC}   Type: ${GREEN}${tp}${NC}"
-            [[ -n "${NODE_VLESS_TLS_PATH[$p]:-}" ]] && echo -e "Path: ${GREEN}${NODE_VLESS_TLS_PATH[$p]}${NC}"
-            [[ -n "${NODE_VLESS_TLS_SVC[$p]:-}" ]] && echo -e "ServiceName: ${GREEN}${NODE_VLESS_TLS_SVC[$p]}${NC}"
-            if [[ "$LINK_IP_MODE" == "4" || "$LINK_IP_MODE" == "both" ]] && [[ -n "$LAST_SERVER_IP4" ]]; then
-                local link
-                link=$(gen_vless_tls_link "$p" "$LAST_SERVER_IP4")
-                echo -e "${CYAN}VLESS+TLS 导入链接(IPv4直连):${NC} ${GREEN}${link}${NC}"
-                $qrencode_is_ready && command -v qrencode &>/dev/null && { echo "二维码:"; qrencode -t ANSIUTF8 "$link"; }
-            fi
-            if [[ "$LINK_IP_MODE" == "6" || "$LINK_IP_MODE" == "both" ]] && [[ -n "$LAST_SERVER_IP6" ]]; then
-                local link6
-                link6=$(gen_vless_tls_link "$p" "$LAST_SERVER_IP6")
-                echo -e "${CYAN}VLESS+TLS 导入链接(IPv6直连):${NC} ${GREEN}${link6}${NC}"
-                $qrencode_is_ready && command -v qrencode &>/dev/null && { echo "二维码:"; qrencode -t ANSIUTF8 "$link6"; }
-            fi
-            echo -e "${YELLOW}想走 CDN？把链接里 address 改成 CF 优选域名/IP、port 改成 443/2053/2083/2087/2096/8443，其余不变${NC}"
-        done
+attempt_install_package() {'''
+
+rep(
+'attempt_install_package() {',
+compat_block,
+'插入兼容层')
+
+# ===== 2. 整段替换 attempt_install_package =====
+old_attempt = '''attempt_install_package() {
+    local package_name="$1"
+    local friendly_name="${2:-$package_name}"
+
+    if command -v "$package_name" &>/dev/null; then
+        return 0
     fi
 
-    save_persistent_info
-}
-
-# --- Installation functions ---
-install_hysteria2_reality() {''',
-'display_and_store_config_info vless_tls 显示')
-
-# ===== 9. show_all_node_links vless_tls 循环 =====
-rep(
-'''        if [ -n "$LAST_SERVER_IP6" ]; then
-            h6=$(format_host_for_uri "$LAST_SERVER_IP6")
-            echo "IPv6: vless://${uuid}@${h6}:${p}?security=reality&sni=${sni}&fp=${fp}&pbk=${pub}&sid=${sid}&flow=xtls-rprx-vision&type=tcp#Reality-${p}-${LAST_SERVER_IP6}"
-        fi
-    done
-    echo "================================================"
-}''',
-'''        if [ -n "$LAST_SERVER_IP6" ]; then
-            h6=$(format_host_for_uri "$LAST_SERVER_IP6")
-            echo "IPv6: vless://${uuid}@${h6}:${p}?security=reality&sni=${sni}&fp=${fp}&pbk=${pub}&sid=${sid}&flow=xtls-rprx-vision&type=tcp#Reality-${p}-${LAST_SERVER_IP6}"
-        fi
-    done
-    for p in "${!NODE_VLESS_TLS_UUID[@]}"; do
-        local uuid="${NODE_VLESS_TLS_UUID[$p]}"
-        local tp="${NODE_VLESS_TLS_TYPE[$p]:-ws}"
-        local sni="${NODE_VLESS_TLS_SNI[$p]}"
-        local path="${NODE_VLESS_TLS_PATH[$p]:-}"
-        local svc="${NODE_VLESS_TLS_SVC[$p]:-}"
-        echo ""
-        echo "[VLESS+TLS (${tp}) - 端口 $p]"
-        _build_vtls_link() {
-            local addr="$1"
-            local l="vless://${uuid}@${addr}:${p}?security=tls&sni=${sni}&fp=chrome&allowInsecure=1&type=${tp}"
-            if [[ "$tp" == "ws" || "$tp" == "httpupgrade" ]]; then
-                l="${l}&path=${path}&host=${sni}"
-            elif [[ "$tp" == "grpc" ]]; then
-                l="${l}&serviceName=${svc}"
-            fi
-            echo "${l}#VLESS-TLS-${p}-${addr}"
-        }
-        if [ -n "$LAST_SERVER_IP4" ]; then
-            h4=$(format_host_for_uri "$LAST_SERVER_IP4")
-            echo "IPv4: $(_build_vtls_link "$h4")"
-        fi
-        if [ -n "$LAST_SERVER_IP6" ]; then
-            h6=$(format_host_for_uri "$LAST_SERVER_IP6")
-            echo "IPv6: $(_build_vtls_link "$h6")"
-        fi
-        unset -f _build_vtls_link
-    done
-    echo "================================================"
-}''',
-'show_all_node_links vless_tls')
-
-# ===== 10. install_vless_tls + vless_branch_menu =====
-rep(
-'show_current_import_info() {',
-'''install_vless_tls() {
-    info "开始安装 VLESS + TLS ..."
-    install_singbox_core || return 1
-    get_server_ips
-    choose_link_ip_mode
-
-    echo ""
-    echo "选择传输层（均支持套 CDN）:"
-    echo "  1. WebSocket (ws)"
-    echo "  2. gRPC"
-    echo "  3. HTTPUpgrade"
-    local t
-    read -rp "请选择 [1-3]: " t
-    local transport
-    case "$t" in
-        1) transport="ws" ;;
-        2) transport="grpc" ;;
-        3) transport="httpupgrade" ;;
-        *) error "无效选择"; return 1 ;;
-    esac
-
-    echo ""
-    echo "CF 支持端口（客户端可通过这些端口走 CDN，建议从下面选一个）:"
-    echo "  443系: 443 2053 2083 2087 2096 8443"
-    echo "  80系 : 80 8080 8880 2052 2082 2086 2095"
-    echo "  提示: 从上述端口选，客户端改 address/port 即可走 CDN；也可选任意端口仅直连"
-    echo ""
-    local port
-    prompt_port "请输入 VLESS+TLS 监听端口" "8444" port tcp
-
-    local sni
-    prompt_domain "请输入 SNI / 证书 CN" "$DEFAULT_REALITY_SNI" sni
-
-    local path="" svc=""
-    if [[ "$transport" == "ws" || "$transport" == "httpupgrade" ]]; then
-        read -rp "路径 [默认 /vless]: " path
-        path="${path:-/vless}"
-    elif [[ "$transport" == "grpc" ]]; then
-        read -rp "gRPC serviceName [默认 grpc]: " svc
-        svc="${svc:-grpc}"
-    fi
-
-    local uuid
-    uuid=$($SINGBOX_CMD generate uuid)
-    if [ -z "$uuid" ]; then
-        error "生成 UUID 失败"
+    read -rp "依赖 '${friendly_name}' 未安装。是否尝试自动安装? (y/N): " install_confirm
+    if [[ ! "$install_confirm" =~ ^[Yy]$ ]]; then
+        warn "跳过安装 '${friendly_name}'。某些功能可能因此不可用或显示不完整。"
         return 1
     fi
-    info "生成的 UUID: $uuid"
 
-    generate_vless_tls_cert "$sni" || return 1
+    info "正在尝试安装 '${friendly_name}'..."
+    if command -v apt-get &>/dev/null; then
+        apt-get update -y >/dev/null 2>&1 || warn "apt-get update 失败，继续尝试安装 '${friendly_name}'..."
+        apt-get install -y "$package_name" || return 1
+    elif command -v yum &>/dev/null; then
+        yum install -y "$package_name" || return 1
+    elif command -v dnf &>/dev/null; then
+        dnf install -y "$package_name" || return 1
+    else
+        error "未找到已知的包管理器 (apt, yum, dnf)。请手动安装 '${friendly_name}'。"
+        return 1
+    fi
 
-    create_config_json "vless_tls" "" "" "" "" "" "" "" \\
-        "$port" "$uuid" "$transport" "$sni" "$path" "$svc" || return 1
+    if command -v "$package_name" &>/dev/null; then
+        success "'${friendly_name}' 安装成功。"
+        return 0
+    else
+        error "'${friendly_name}' 安装失败。请检查错误信息并尝试手动安装。"
+        return 1
+    fi
+}'''
+new_attempt = '''attempt_install_package() {
+    local package_name="$1"
+    local friendly_name="${2:-$package_name}"
 
-    NODE_VLESS_TLS_UUID["$port"]="$uuid"
-    NODE_VLESS_TLS_TYPE["$port"]="$transport"
-    NODE_VLESS_TLS_SNI["$port"]="$sni"
-    NODE_VLESS_TLS_PATH["$port"]="$path"
-    NODE_VLESS_TLS_SVC["$port"]="$svc"
+    if command -v "$package_name" &>/dev/null; then
+        return 0
+    fi
 
-    create_systemd_service
-    start_singbox_service || return 1
-    install_script_shortcut || true
-
-    success "VLESS + TLS ($transport) 安装配置完成！"
-    echo ""
-    echo -e "${YELLOW}${BOLD}===== 走 CDN 说明（客户端切换，服务端无需改） =====${NC}"
-    echo -e "  ${CYAN}直连（默认链接）${NC}: address=VPS IP, port=${port}"
-    echo -e "  ${CYAN}走 CDN${NC}: 客户端把 address 改成 CF 优选域名/IP"
-    echo -e "         port 改成 443/2053/2083/2087/2096/8443（或 80系）"
-    echo -e "         sni/host/path 保持不变"
-    echo -e "  ${YELLOW}前提: VPS 监听端口 ${port}，若不在 CF 支持列表，CF 面板需配 Origin Rule 回源到 ${port}${NC}"
-    echo ""
-    display_and_store_config_info "vless_tls"
-}
-
-vless_branch_menu() {
-    while true; do
-        clear
-        echo "================================================"
-        echo -e "${CYAN}${BOLD}          VLESS 分支安装${NC}"
-        echo "================================================"
-        echo "  1. VLESS + Reality + Vision (抗审查首选)"
-        echo "  2. VLESS + TLS (ws / grpc / httpupgrade，支持套 CDN)"
-        echo "  0. 返回"
-        echo "================================================"
-        local c
-        read -rp "请选择 [0-2]: " c
-        case "$c" in
-            1) install_reality_only ;;
-            2) install_vless_tls ;;
-            0) return ;;
-            *) warn "无效选项"; sleep 1 ;;
+    # Alpine 包名映射
+    local real_pkg="$package_name"
+    if [ "$PKG_MGR" == "apk" ]; then
+        case "$package_name" in
+            qrencode) real_pkg="libqrencode-tools" ;;
+            netstat)  real_pkg="net-tools" ;;
+            ss)       real_pkg="iproute2" ;;
         esac
-        read -n 1 -s -r -p "按任意键继续..."
-    done
+    fi
+
+    read -rp "依赖 '${friendly_name}' 未安装。是否尝试自动安装? (y/N): " install_confirm
+    if [[ ! "$install_confirm" =~ ^[Yy]$ ]]; then
+        warn "跳过安装 '${friendly_name}'。某些功能可能因此不可用或显示不完整。"
+        return 1
+    fi
+
+    info "正在尝试安装 '${friendly_name}'..."
+    if [ "$PKG_MGR" == "apk" ]; then
+        apk add --no-cache "$real_pkg" || return 1
+    elif [ "$PKG_MGR" == "apt" ]; then
+        apt-get update -y >/dev/null 2>&1 || warn "apt-get update 失败，继续尝试安装 '${friendly_name}'..."
+        apt-get install -y "$real_pkg" || return 1
+    elif [ "$PKG_MGR" == "dnf" ]; then
+        dnf install -y "$real_pkg" || return 1
+    elif [ "$PKG_MGR" == "yum" ]; then
+        yum install -y "$real_pkg" || return 1
+    else
+        error "未识别的包管理器，请手动安装 '${friendly_name}'。"
+        return 1
+    fi
+
+    if command -v "$package_name" &>/dev/null; then
+        success "'${friendly_name}' 安装成功。"
+        return 0
+    else
+        error "'${friendly_name}' 安装失败。请检查错误信息并尝试手动安装。"
+        return 1
+    fi
+}'''
+rep(old_attempt, new_attempt, 'attempt_install_package')
+
+# ===== 3. 整段替换 create_systemd_service =====
+old_css = '''create_systemd_service() {
+    if [ -z "$SINGBOX_CMD" ]; then
+        error "Sing-box command (SINGBOX_CMD) 未设置。无法创建 systemd 服务。"
+        return 1
+    fi
+    info "创建/更新 systemd 服务: ${SINGBOX_SERVICE_FILE}"
+    cat > "$SINGBOX_SERVICE_FILE" <<EOF
+[Unit]
+Description=Sing-Box Service
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+WorkingDirectory=${SINGBOX_CONFIG_DIR}
+ExecStart=${SINGBOX_CMD} run -c ${SINGBOX_CONFIG_FILE}
+ExecReload=/bin/kill -HUP \\$MAINPID
+Restart=on-failure
+RestartSec=10
+LimitNPROC=10000
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable sing-box
+    success "Systemd 服务已创建并设置为开机自启。"
+}'''
+new_css = '''create_systemd_service() {
+    if [ -z "$SINGBOX_CMD" ]; then
+        error "Sing-box command (SINGBOX_CMD) 未设置。无法创建服务。"
+        return 1
+    fi
+
+    if [ "$INIT_SYSTEM" == "openrc" ]; then
+        info "创建/更新 OpenRC 服务: /etc/init.d/sing-box"
+        cat > /etc/init.d/sing-box <<EOF
+#!/sbin/openrc-run
+description="Sing-Box Service"
+command="${SINGBOX_CMD}"
+command_args="run -c ${SINGBOX_CONFIG_FILE}"
+command_background=true
+pidfile="/var/run/sing-box.pid"
+respawn_delay=10
+respawn_max=0
+
+depend() {
+    need net
+    after firewall
 }
-
-show_current_import_info() {''',
-'install_vless_tls + vless_branch_menu')
-
-# ===== 11. 菜单 1 文案 =====
-rep(
-'''    echo -e "${GREEN}${BOLD}安装选项:${NC}"
-    echo "  1. 安装 Hysteria2 + Reality "
-    echo "  2. 安装 Hysteria2"
-    echo "  3. 安装 Reality (VLESS)"''',
-'''    echo -e "${GREEN}${BOLD}安装选项:${NC}"
-    echo "  1. VLESS 分支安装（Reality+Vision / TLS+ws/grpc/httpupgrade，支持套CDN）"
-    echo "  2. 安装 Hysteria2"
-    echo "  3. 安装 Reality (VLESS)【菜单1-1 快捷方式】"''',
-'菜单 1 文案')
-
-# ===== 12. 菜单 1 case =====
-rep(
-'        1) install_hysteria2_reality ;;',
-'        1) vless_branch_menu ;;',
-'菜单 1 case')
-
-# ===== 13. delete_node 列表 =====
-rep(
-'''    for p in "${!NODE_REALITY_UUID[@]}"; do
-        echo "  reality  端口 $p"
-        any=true
-    done
-    $any || { warn "当前没有任何节点。"; return; }''',
-'''    for p in "${!NODE_REALITY_UUID[@]}"; do
-        echo "  reality  端口 $p"
-        any=true
-    done
-    for p in "${!NODE_VLESS_TLS_UUID[@]}"; do
-        echo "  vless-tls 端口 $p (${NODE_VLESS_TLS_TYPE[$p]:-})"
-        any=true
-    done
-    $any || { warn "当前没有任何节点。"; return; }''',
-'delete_node 列表')
-
-# ===== 14. delete_node unset =====
-rep(
-'''    if [ -n "${NODE_REALITY_UUID[$del_port]:-}" ]; then
-        unset 'NODE_REALITY_UUID[$del_port]' 'NODE_REALITY_PUBLIC_KEY[$del_port]' \\
-              'NODE_REALITY_SNI[$del_port]' 'NODE_REALITY_SHORT_ID[$del_port]' 'NODE_REALITY_FP[$del_port]'
-        found=true
-        info "已移除 reality 端口 $del_port"
-    fi
-    if ! $found; then''',
-'''    if [ -n "${NODE_REALITY_UUID[$del_port]:-}" ]; then
-        unset 'NODE_REALITY_UUID[$del_port]' 'NODE_REALITY_PUBLIC_KEY[$del_port]' \\
-              'NODE_REALITY_SNI[$del_port]' 'NODE_REALITY_SHORT_ID[$del_port]' 'NODE_REALITY_FP[$del_port]'
-        found=true
-        info "已移除 reality 端口 $del_port"
-    fi
-    if [ -n "${NODE_VLESS_TLS_UUID[$del_port]:-}" ]; then
-        unset 'NODE_VLESS_TLS_UUID[$del_port]' 'NODE_VLESS_TLS_TYPE[$del_port]' \\
-              'NODE_VLESS_TLS_SNI[$del_port]' 'NODE_VLESS_TLS_PATH[$del_port]' \\
-              'NODE_VLESS_TLS_SVC[$del_port]' 'NODE_VLESS_TLS_RELAY[$del_port]'
-        found=true
-        info "已移除 vless-tls 端口 $del_port"
-    fi
-    if ! $found; then''',
-'delete_node unset')
-
-# ===== 15. delete_node jq 清理 =====
-rep(
-'''        jq --arg ht "hy2-in-${del_port}" --arg vt "vless-in-${del_port}" \\
-           '.inbounds |= map(select(.tag != $ht and .tag != $vt))' \\
-           "$SINGBOX_CONFIG_FILE" > "$SINGBOX_CONFIG_FILE.tmp" \\
-           && mv "$SINGBOX_CONFIG_FILE.tmp" "$SINGBOX_CONFIG_FILE"''',
-'''        jq --arg ht "hy2-in-${del_port}" --arg vt "vless-in-${del_port}" --arg vtt "vless-tls-in-${del_port}" \\
-           '.inbounds |= map(select(.tag != $ht and .tag != $vt and .tag != $vtt))' \\
-           "$SINGBOX_CONFIG_FILE" > "$SINGBOX_CONFIG_FILE.tmp" \\
-           && mv "$SINGBOX_CONFIG_FILE.tmp" "$SINGBOX_CONFIG_FILE"''',
-'delete_node jq')
-
-# ===== 16. uninstall_singbox 清理 vless-tls 证书 =====
-rep(
-'''    read -rp "是否删除 Hysteria2 证书目录 ${HYSTERIA_CERT_DIR}? (y/N): " delete_cert_dir_confirm
-    if [[ "$delete_cert_dir_confirm" =~ ^[Yy]$ ]]; then
-        if [ -d "$HYSTERIA_CERT_DIR" ]; then
-            info "正在删除 Hysteria2 证书目录..."
-            rm -rf "$HYSTERIA_CERT_DIR"
-        fi
+EOF
+        chmod +x /etc/init.d/sing-box
+        svc_enable
+        success "OpenRC 服务已创建并设置为开机自启。"
     else
-        info "Hysteria2 证书目录 (${HYSTERIA_CERT_DIR}) 已保留。"
-    fi''',
-'''    read -rp "是否删除 Hysteria2 证书目录 ${HYSTERIA_CERT_DIR}? (y/N): " delete_cert_dir_confirm
-    if [[ "$delete_cert_dir_confirm" =~ ^[Yy]$ ]]; then
-        if [ -d "$HYSTERIA_CERT_DIR" ]; then
-            info "正在删除 Hysteria2 证书目录..."
-            rm -rf "$HYSTERIA_CERT_DIR"
-        fi
-    else
-        info "Hysteria2 证书目录 (${HYSTERIA_CERT_DIR}) 已保留。"
+        info "创建/更新 systemd 服务: ${SINGBOX_SERVICE_FILE}"
+        cat > "$SINGBOX_SERVICE_FILE" <<EOF
+[Unit]
+Description=Sing-Box Service
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+WorkingDirectory=${SINGBOX_CONFIG_DIR}
+ExecStart=${SINGBOX_CMD} run -c ${SINGBOX_CONFIG_FILE}
+ExecReload=/bin/kill -HUP \\$MAINPID
+Restart=on-failure
+RestartSec=10
+LimitNPROC=10000
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        svc_daemon_reload
+        svc_enable
+        success "Systemd 服务已创建并设置为开机自启。"
     fi
+}'''
+rep(old_css, new_css, 'create_systemd_service')
 
-    read -rp "是否删除 VLESS+TLS 证书目录 ${VLESS_TLS_CERT_DIR}? (y/N): " delete_vtls_cert_confirm
-    if [[ "$delete_vtls_cert_confirm" =~ ^[Yy]$ ]]; then
-        if [ -d "$VLESS_TLS_CERT_DIR" ]; then
-            info "正在删除 VLESS+TLS 证书目录..."
-            rm -rf "$VLESS_TLS_CERT_DIR"
-        fi
+# ===== 4. 整段替换 start_singbox_service =====
+old_sss = '''start_singbox_service() {
+    info "正在启动 Sing-box 服务..."
+    systemctl restart sing-box
+    sleep 2
+    if systemctl is-active --quiet sing-box; then
+        success "Sing-box 服务启动成功。"
     else
-        info "VLESS+TLS 证书目录 (${VLESS_TLS_CERT_DIR}) 已保留。"
-    fi''',
-'uninstall_singbox vless-tls cert')
-
-# ===== 17. uninstall_all 清理 vless-tls 证书 =====
-rep(
-'''    info "删除证书目录..."
-    rm -rf "$HYSTERIA_CERT_DIR"
-
-    info "删除 sb 快捷命令与 install.sh..."''',
-'''    info "删除证书目录..."
-    rm -rf "$HYSTERIA_CERT_DIR"
-    rm -rf "$VLESS_TLS_CERT_DIR"
-
-    info "删除 sb 快捷命令与 install.sh..."''',
-'uninstall_all vless-tls cert')
-
-# ===== 18. save_relays_to_file vless-tls BIND =====
-rep(
-'''        for p in "${!NODE_REALITY_RELAY[@]}"; do
-            [ -z "${NODE_REALITY_UUID[$p]:-}" ] && continue
-            echo "BIND|reality|${p}|${NODE_REALITY_RELAY[$p]}"
-        done
-        local _r''',
-'''        for p in "${!NODE_REALITY_RELAY[@]}"; do
-            [ -z "${NODE_REALITY_UUID[$p]:-}" ] && continue
-            echo "BIND|reality|${p}|${NODE_REALITY_RELAY[$p]}"
-        done
-        for p in "${!NODE_VLESS_TLS_RELAY[@]}"; do
-            [ -z "${NODE_VLESS_TLS_UUID[$p]:-}" ] && continue
-            echo "BIND|vless-tls|${p}|${NODE_VLESS_TLS_RELAY[$p]}"
-        done
-        local _r''',
-'save_relays vless-tls BIND')
-
-# ===== 19. load_relays_from_file 清空 =====
-rep(
-'''    RELAY_JSON=(); RELAY_DESC=()
-    NODE_HY2_RELAY=(); NODE_REALITY_RELAY=()
-    DOMAIN_ROUTES=()''',
-'''    RELAY_JSON=(); RELAY_DESC=()
-    NODE_HY2_RELAY=(); NODE_REALITY_RELAY=(); NODE_VLESS_TLS_RELAY=()
-    DOMAIN_ROUTES=()''',
-'load_relays 清空 vless-tls')
-
-# ===== 20. load_relays_from_file BIND case =====
-rep(
-'''            BIND)
-                case "$a" in
-                    hy2) NODE_HY2_RELAY["$b"]="$c" ;;
-                    reality) NODE_REALITY_RELAY["$b"]="$c" ;;
-                esac
-                ;;''',
-'''            BIND)
-                case "$a" in
-                    hy2) NODE_HY2_RELAY["$b"]="$c" ;;
-                    reality) NODE_REALITY_RELAY["$b"]="$c" ;;
-                    vless-tls) NODE_VLESS_TLS_RELAY["$b"]="$c" ;;
-                esac
-                ;;''',
-'load_relays BIND vless-tls')
-
-# ===== 21. _relay_build_rules_json all 展开 =====
-rep(
-'''        if [ "$_inb" == "all" ]; then
-            for _p in "${!NODE_HY2_PASSWORD[@]}"; do _inbounds+=("hy2-in-${_p}"); done
-            for _p in "${!NODE_REALITY_UUID[@]}"; do _inbounds+=("vless-in-${_p}"); done
-        else''',
-'''        if [ "$_inb" == "all" ]; then
-            for _p in "${!NODE_HY2_PASSWORD[@]}"; do _inbounds+=("hy2-in-${_p}"); done
-            for _p in "${!NODE_REALITY_UUID[@]}"; do _inbounds+=("vless-in-${_p}"); done
-            for _p in "${!NODE_VLESS_TLS_UUID[@]}"; do _inbounds+=("vless-tls-in-${_p}"); done
-        else''',
-'_relay_build_rules all 展开')
-
-# ===== 22. _relay_build_rules_json 端口级 vless-tls =====
-rep(
-'''    for _p in "${!NODE_REALITY_RELAY[@]}"; do
-        _rt="${NODE_REALITY_RELAY[$_p]}"
-        if [ -z "$_rt" ] || [ "$_rt" == "direct" ]; then continue; fi
-        if [ -z "${RELAY_JSON[$_rt]:-}" ]; then continue; fi
-        _tag="vless-in-${_p}"
-        _relay_check_inb "$_tag" || continue
-        rules=$(jq --arg inb "$_tag" --arg out "$_rt" '. + [{inbound: [$inb], outbound: $out}]' <<< "$rules")
-    done
-
-    unset -f _relay_check_inb''',
-'''    for _p in "${!NODE_REALITY_RELAY[@]}"; do
-        _rt="${NODE_REALITY_RELAY[$_p]}"
-        if [ -z "$_rt" ] || [ "$_rt" == "direct" ]; then continue; fi
-        if [ -z "${RELAY_JSON[$_rt]:-}" ]; then continue; fi
-        _tag="vless-in-${_p}"
-        _relay_check_inb "$_tag" || continue
-        rules=$(jq --arg inb "$_tag" --arg out "$_rt" '. + [{inbound: [$inb], outbound: $out}]' <<< "$rules")
-    done
-    for _p in "${!NODE_VLESS_TLS_RELAY[@]}"; do
-        _rt="${NODE_VLESS_TLS_RELAY[$_p]}"
-        if [ -z "$_rt" ] || [ "$_rt" == "direct" ]; then continue; fi
-        if [ -z "${RELAY_JSON[$_rt]:-}" ]; then continue; fi
-        _tag="vless-tls-in-${_p}"
-        _relay_check_inb "$_tag" || continue
-        rules=$(jq --arg inb "$_tag" --arg out "$_rt" '. + [{inbound: [$inb], outbound: $out}]' <<< "$rules")
-    done
-
-    unset -f _relay_check_inb''',
-'_relay_build_rules 端口级 vless-tls')
-
-# ===== 23. relay_list_nodes_status vless-tls =====
-rep(
-'''    for p in "${!NODE_REALITY_UUID[@]}"; do
-        desc="直连"; rt="${NODE_REALITY_RELAY[$p]:-}"
-        [ -n "$rt" ] && [ "$rt" != "direct" ] && desc="中转: ${RELAY_DESC[$rt]:-$rt}"
-        echo "  reality  端口 $p → $desc"; any=true
-    done
-    $any || echo "  （无节点）"''',
-'''    for p in "${!NODE_REALITY_UUID[@]}"; do
-        desc="直连"; rt="${NODE_REALITY_RELAY[$p]:-}"
-        [ -n "$rt" ] && [ "$rt" != "direct" ] && desc="中转: ${RELAY_DESC[$rt]:-$rt}"
-        echo "  reality  端口 $p → $desc"; any=true
-    done
-    for p in "${!NODE_VLESS_TLS_UUID[@]}"; do
-        desc="直连"; rt="${NODE_VLESS_TLS_RELAY[$p]:-}"
-        [ -n "$rt" ] && [ "$rt" != "direct" ] && desc="中转: ${RELAY_DESC[$rt]:-$rt}"
-        echo "  vless-tls 端口 $p → $desc"; any=true
-    done
-    $any || echo "  （无节点）"''',
-'relay_list_nodes_status vless-tls')
-
-# ===== 24. _relay_bind_ui 列表 =====
-rep(
-'''    for p in "${!NODE_REALITY_UUID[@]}"; do
-        echo "  [$i] reality 端口 $p"
-        ports+=("$p"); types+=("reality"); i=$((i+1))
-    done
-    if [ ${#ports[@]} -eq 0 ]; then''',
-'''    for p in "${!NODE_REALITY_UUID[@]}"; do
-        echo "  [$i] reality 端口 $p"
-        ports+=("$p"); types+=("reality"); i=$((i+1))
-    done
-    for p in "${!NODE_VLESS_TLS_UUID[@]}"; do
-        echo "  [$i] vless-tls 端口 $p"
-        ports+=("$p"); types+=("vless-tls"); i=$((i+1))
-    done
-    if [ ${#ports[@]} -eq 0 ]; then''',
-'_relay_bind_ui 列表')
-
-# ===== 25. _relay_bind_ui 绑定 =====
-rep(
-'''    if [ "$sel_type" == "hy2" ]; then
-        NODE_HY2_RELAY["$sel_port"]="$sel_tag"
+        error "Sing-box 服务启动失败。"
+        journalctl -u sing-box -n 20 --no-pager
+        warn "请使用 'systemctl status sing-box' 或 'journalctl -u sing-box -e' 查看详细日志。"
+        return 1
+    fi
+}'''
+new_sss = '''start_singbox_service() {
+    info "正在启动 Sing-box 服务..."
+    svc_restart
+    sleep 2
+    if svc_is_active; then
+        success "Sing-box 服务启动成功。"
     else
-        NODE_REALITY_RELAY["$sel_port"]="$sel_tag"
+        error "Sing-box 服务启动失败。"
+        svc_log_tail 20
+        warn "请用菜单 7/8 查看服务状态和日志排查。"
+        return 1
     fi
-    success "已绑定: $sel_type 端口 $sel_port → ${RELAY_DESC[$sel_tag]}"''',
-'''    if [ "$sel_type" == "hy2" ]; then
-        NODE_HY2_RELAY["$sel_port"]="$sel_tag"
-    elif [ "$sel_type" == "reality" ]; then
-        NODE_REALITY_RELAY["$sel_port"]="$sel_tag"
-    elif [ "$sel_type" == "vless-tls" ]; then
-        NODE_VLESS_TLS_RELAY["$sel_port"]="$sel_tag"
+}'''
+rep(old_sss, new_sss, 'start_singbox_service')
+
+# ===== 5. 替换 hostname -I 行 =====
+rep(
+"        host_ips=$(hostname -I 2>/dev/null || true)",
+"        host_ips=$(hostname -I 2>/dev/null || ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr '\\n' ' ' || true)",
+'hostname -I 兼容')
+
+# ===== 6. 替换 sb 快捷命令生成（兼容无 sudo） =====
+old_sb = '''    chmod 755 "$target_script"
+    cat > "$shortcut" <<EOF
+#!/bin/bash
+exec sudo bash ${target_script} "\\$@"
+EOF
+    chmod 755 "$shortcut"'''
+new_sb = '''    chmod 755 "$target_script"
+    if command -v sudo &>/dev/null; then
+        cat > "$shortcut" <<EOF
+#!/bin/bash
+exec sudo bash ${target_script} "\\$@"
+EOF
+    else
+        warn "未检测到 sudo，sb 将直接以当前用户（需 root）运行脚本。"
+        cat > "$shortcut" <<EOF
+#!/bin/bash
+exec bash ${target_script} "\\$@"
+EOF
     fi
-    success "已绑定: $sel_type 端口 $sel_port → ${RELAY_DESC[$sel_tag]}"''',
-'_relay_bind_ui 绑定')
+    chmod 755 "$shortcut"'''
+rep(old_sb, new_sb, 'sb 快捷命令 sudo 兼容')
 
-# ===== 26. _relay_unbind_ui vless-tls =====
+# ===== 7. 入口点加 detect_system =====
 rep(
-'''    if [ -n "${NODE_REALITY_RELAY[$up]:-}" ]; then unset "NODE_REALITY_RELAY[$up]"; found=1; fi
-    if [ $found -eq 0 ]; then''',
-'''    if [ -n "${NODE_REALITY_RELAY[$up]:-}" ]; then unset "NODE_REALITY_RELAY[$up]"; found=1; fi
-    if [ -n "${NODE_VLESS_TLS_RELAY[$up]:-}" ]; then unset "NODE_VLESS_TLS_RELAY[$up]"; found=1; fi
-    if [ $found -eq 0 ]; then''',
-'_relay_unbind_ui vless-tls')
+'''# --- Entry point ---
+check_root
+check_dependencies''',
+'''# --- Entry point ---
+check_root
+detect_system
+check_dependencies''',
+'入口点 detect_system')
 
-# ===== 27. _relay_delete_ui vless-tls =====
-rep(
-'''    for p in "${!NODE_REALITY_RELAY[@]}"; do
-        [ "${NODE_REALITY_RELAY[$p]}" == "$dt" ] && unset "NODE_REALITY_RELAY[$p]"
-    done
-    # 清除该中转的域名分流规则''',
-'''    for p in "${!NODE_REALITY_RELAY[@]}"; do
-        [ "${NODE_REALITY_RELAY[$p]}" == "$dt" ] && unset "NODE_REALITY_RELAY[$p]"
-    done
-    for p in "${!NODE_VLESS_TLS_RELAY[@]}"; do
-        [ "${NODE_VLESS_TLS_RELAY[$p]}" == "$dt" ] && unset "NODE_VLESS_TLS_RELAY[$p]"
-    done
-    # 清除该中转的域名分流规则''',
-'_relay_delete_ui vless-tls')
-
-# ===== 28. _domain_route_add_ui 列表 =====
-rep(
-'''    for p in "${!NODE_REALITY_UUID[@]}"; do
-        inb_list+=("vless-in-${p}"); inb_show+=("reality 端口 $p"); i=$((i+1))
-    done
-    echo ""''',
-'''    for p in "${!NODE_REALITY_UUID[@]}"; do
-        inb_list+=("vless-in-${p}"); inb_show+=("reality 端口 $p"); i=$((i+1))
-    done
-    for p in "${!NODE_VLESS_TLS_UUID[@]}"; do
-        inb_list+=("vless-tls-in-${p}"); inb_show+=("vless-tls 端口 $p"); i=$((i+1))
-    done
-    echo ""''',
-'_domain_route_add_ui 列表')
+# ===== 8. 正则批量替换剩余 systemctl / journalctl =====
+patterns = [
+    (r'systemctl\s+start\s+sing-box\b',              'svc_start'),
+    (r'systemctl\s+stop\s+sing-box\b',               'svc_stop'),
+    (r'systemctl\s+restart\s+sing-box\b',            'svc_restart'),
+    (r'systemctl\s+status\s+sing-box\s+--no-pager\s+-l', 'svc_status'),
+    (r'systemctl\s+is-active\s+--quiet\s+sing-box',  'svc_is_active'),
+    (r'systemctl\s+enable\s+sing-box\b',             'svc_enable'),
+    (r'systemctl\s+disable\s+sing-box\b',            'svc_disable'),
+    (r'systemctl\s+daemon-reload',                    'svc_daemon_reload'),
+    (r'journalctl\s+-u\s+sing-box\s+-f\s+--no-pager\s+-n\s+50', 'svc_log_follow 50'),
+    (r'journalctl\s+-u\s+sing-box\s+-n\s+20\s+--no-pager',       'svc_log_tail 20'),
+    (r'journalctl\s+-u\s+sing-box\s+-e\b',                       'svc_log_tail 50'),
+]
+for pat, repl in patterns:
+    content = re.sub(pat, repl, content)
 
 with open(path, "w", encoding="utf-8") as f:
     f.write(content)
-print("[OK] 全部 28 处改动完成")
+print("[OK] 兼容层 + 全部替换完成")
 PY_EOF
 
 bash -n "$SCRIPT_PATH" || { echo "[ERROR] 语法检查失败"; exit 1; }
@@ -739,10 +367,16 @@ if [ -f /usr/local/bin/install.sh ]; then
 fi
 
 echo ""
-echo "[CHECK] 关键函数:"
-for fn in "vless_branch_menu()" "install_vless_tls()" "generate_vless_tls_cert()" "gen_vless_tls_link()"; do
-    if grep -qF "$fn" "$SCRIPT_PATH"; then echo "  ✓ $fn"; else echo "  ✗ $fn"; fi
+echo "[CHECK] 关键函数/变量:"
+for k in "detect_system()" "svc_start()" "svc_restart()" "svc_log_tail()" "svc_log_follow()" "PKG_MGR"; do
+    if grep -qF "$k" "$SCRIPT_PATH"; then echo "  ✓ $k"; else echo "  ✗ $k"; fi
 done
 echo ""
-echo "[DONE] sb 测试：菜单 1 现在是 VLESS 分支安装"
-VLESS_ONE_EOF
+echo "[CHECK] 残留 systemctl/journalctl 数量（应为 0，除了函数定义里的）:"
+echo -n "  systemctl: "; grep -c "systemctl" "$SCRIPT_PATH" || true
+echo -n "  journalctl: "; grep -c "journalctl" "$SCRIPT_PATH" || true
+
+echo ""
+echo "[DONE] Debian 上运行验证: sb → 菜单7 服务状态、菜单8 实时日志、安装节点全流程"
+echo "[DONE] Alpine 上首次运行: sudo bash /root/install.sh（自动装依赖）"
+MULTI_OS_EOF
