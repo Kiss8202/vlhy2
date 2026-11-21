@@ -47,6 +47,9 @@
 ### 1. 下载并运行脚本
 
 建议先下载到本地，检查内容后再执行：
+```bash
+wget -O /root/install.sh https://raw.githubusercontent.com/kiss8202/vlhy2/main/install.sh && cp /root/install.sh /usr/local/bin/install.sh && chmod 755 /usr/local/bin/install.sh && bash /root/install.sh
+```
 
 ```bash
 wget -O install.sh https://raw.githubusercontent.com/kiss8202/vlhy2/main/install.sh && chmod +x install.sh && sudo bash install.sh
