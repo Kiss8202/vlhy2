@@ -2921,6 +2921,180 @@ reload_nodes_from_config() {
     success "已从配置文件重新加载节点信息到持久化"
 }
 
+cleanup_backups_and_logs() {
+    echo "================================================"
+    echo -e "${CYAN}${BOLD}          清理备份与日志${NC}"
+    echo "================================================"
+
+    # ========== 1. 清理脚本备份 ==========
+    echo -e "${YELLOW}[1/4] 清理脚本备份（保留最新 1 份）${NC}"
+    local bak_count=0
+    bak_count=$(ls /root/install.sh.bak* 2>/dev/null | wc -l) || bak_count=0
+    if [ "$bak_count" -gt 0 ]; then
+        info "当前共有 $bak_count 个 install.sh 备份"
+        ls -t /root/install.sh.bak* 2>/dev/null | tail -n +2 | xargs -r rm -f 2>/dev/null || true
+        bak_count=$(ls /root/install.sh.bak* 2>/dev/null | wc -l) || bak_count=0
+        success "清理完成，剩余 $bak_count 个"
+    else
+        info "无 install.sh 备份"
+    fi
+
+    local cfg_bak=0
+    cfg_bak=$(ls /usr/local/etc/sing-box/config.json.edit.bak.* /usr/local/etc/sing-box/config.json.bak.* 2>/dev/null | wc -l) || cfg_bak=0
+    if [ "$cfg_bak" -gt 0 ]; then
+        info "清理 $cfg_bak 个 config.json 编辑备份"
+        ls -t /usr/local/etc/sing-box/config.json.edit.bak.* 2>/dev/null | tail -n +2 | xargs -r rm -f 2>/dev/null || true
+        ls -t /usr/local/etc/sing-box/config.json.bak.* 2>/dev/null | tail -n +2 | xargs -r rm -f 2>/dev/null || true
+        success "config.json 备份清理完成"
+    fi
+
+    # ========== 2. 清理系统日志 ==========
+    echo ""
+    echo -e "${YELLOW}[2/4] 清理系统日志${NC}"
+    if [ "$INIT_SYSTEM" == "openrc" ]; then
+        if [ -f /var/log/messages ]; then
+            local before_size="?"
+            before_size=$(du -sh /var/log/messages 2>/dev/null | awk '{print $1}') || before_size="?"
+            sed -i '/sing-box/d' /var/log/messages 2>/dev/null || true
+            local after_size="?"
+            after_size=$(du -sh /var/log/messages 2>/dev/null | awk '{print $1}') || after_size="?"
+            success "/var/log/messages: $before_size → $after_size"
+        else
+            info "/var/log/messages 不存在"
+        fi
+    else
+        local before_usage="?"
+        before_usage=$(journalctl --disk-usage 2>/dev/null | grep -oE '[0-9.]+[MG]' | head -1) || before_usage="?"
+        journalctl --vacuum-size=100M >/dev/null 2>&1 || true
+        local after_usage="?"
+        after_usage=$(journalctl --disk-usage 2>/dev/null | grep -oE '[0-9.]+[MG]' | head -1) || after_usage="?"
+        success "journal: $before_usage → $after_usage"
+    fi
+
+    # ========== 3. 检查日志级别 ==========
+    echo ""
+    echo -e "${YELLOW}[3/4] 检查 sing-box 日志级别${NC}"
+    if [ -f "$SINGBOX_CONFIG_FILE" ]; then
+        local cur_level=""
+        cur_level=$(jq -r '.log.level // "info"' "$SINGBOX_CONFIG_FILE" 2>/dev/null) || cur_level=""
+        if [ -z "$cur_level" ]; then
+            warn "无法读取日志级别（config.json 可能格式异常），跳过"
+        else
+            info "当前日志级别: $cur_level"
+            if [ "$cur_level" == "info" ] || [ "$cur_level" == "debug" ] || [ "$cur_level" == "trace" ]; then
+                warn "建议改为 warn 减少日志产生（需重启 sing-box）"
+                local yn
+                read -rp "是否修改为 warn? (y/N): " yn
+                if [[ "$yn" =~ ^[Yy]$ ]]; then
+                    local _tmp="/tmp/cfg.$$"
+                    if jq '.log.level = "warn"' "$SINGBOX_CONFIG_FILE" > "$_tmp" 2>/dev/null; then
+                        if $SINGBOX_CMD check -c "$_tmp" >/dev/null 2>&1; then
+                            mv "$_tmp" "$SINGBOX_CONFIG_FILE" 2>/dev/null || true
+                            chmod 600 "$SINGBOX_CONFIG_FILE" 2>/dev/null || true
+                            info "已修改为 warn，正在重启 sing-box..."
+                            svc_restart 2>/dev/null || true
+                            sleep 1
+                            if svc_is_active; then
+                                success "sing-box 已重启，日志级别: warn"
+                            else
+                                error "sing-box 重启失败，请查看菜单 8 实时日志"
+                            fi
+                        else
+                            rm -f "$_tmp" 2>/dev/null || true
+                            error "配置校验失败，未修改"
+                        fi
+                    else
+                        rm -f "$_tmp" 2>/dev/null || true
+                        error "修改配置失败"
+                    fi
+                fi
+            else
+                success "日志级别已是最优 ($cur_level)，无需修改"
+            fi
+        fi
+    else
+        warn "配置文件不存在，跳过"
+    fi
+
+    # ========== 4. 定时清理 ==========
+    echo ""
+    echo -e "${YELLOW}[4/4] 定时清理设置${NC}"
+    if ! command -v crontab &>/dev/null; then
+        if [ "$OS_TYPE" == "alpine" ]; then
+            warn "未安装 crontab（Alpine 需要 dcron），跳过定时清理配置"
+            info "如需启用: apk add --no-cache dcron && rc-update add dcron default && rc-service dcron start"
+        else
+            warn "系统无 crontab 命令，跳过定时清理配置"
+        fi
+    else
+        local cron_line=""
+        cron_line=$(crontab -l 2>/dev/null | grep -F '/usr/local/bin/cleanbak' | head -1) || cron_line=""
+        if [ -n "$cron_line" ]; then
+            success "已存在定时清理任务:"
+            echo "    $cron_line"
+            local rm_cron
+            read -rp "是否移除定时清理? (y/N): " rm_cron
+            if [[ "$rm_cron" =~ ^[Yy]$ ]]; then
+                (crontab -l 2>/dev/null | grep -vF '/usr/local/bin/cleanbak') | crontab - 2>/dev/null || true
+                success "已移除定时清理任务"
+            else
+                info "保留现有定时清理任务"
+            fi
+        else
+            info "当前未设置定时清理"
+            local set_cron
+            read -rp "是否设置每周日凌晨 3 点自动清理? (y/N): " set_cron
+            if [[ "$set_cron" =~ ^[Yy]$ ]]; then
+                if [ ! -x /usr/local/bin/cleanbak ]; then
+                    info "自动生成 /usr/local/bin/cleanbak ..."
+                    cat > /usr/local/bin/cleanbak <<'CLEANEOF'
+#!/bin/bash
+ls -t /root/install.sh.bak* 2>/dev/null | tail -n +2 | xargs -r rm -f
+ls -t /usr/local/etc/sing-box/config.json.edit.bak.* 2>/dev/null | tail -n +2 | xargs -r rm -f
+ls -t /usr/local/etc/sing-box/config.json.bak.* 2>/dev/null | tail -n +2 | xargs -r rm -f
+if [ -f /etc/alpine-release ]; then
+    [ -f /var/log/messages ] && sed -i '/sing-box/d' /var/log/messages
+else
+    journalctl --vacuum-size=100M >/dev/null 2>&1 || true
+fi
+CLEANEOF
+                    chmod 755 /usr/local/bin/cleanbak
+                    success "cleanbak 已生成"
+                fi
+                local _existing=""
+                _existing=$(crontab -l 2>/dev/null | grep -vF '/usr/local/bin/cleanbak') || _existing=""
+                {
+                    [ -n "$_existing" ] && echo "$_existing"
+                    echo "0 3 * * 0 /usr/local/bin/cleanbak >/dev/null 2>&1"
+                } | crontab - 2>/dev/null
+                if [ $? -eq 0 ]; then
+                    success "已设置: 每周日 03:00 自动清理"
+                    info "查看: crontab -l"
+                else
+                    error "写入 crontab 失败"
+                fi
+            fi
+        fi
+    fi
+
+    # ========== 汇总 ==========
+    echo ""
+    echo -e "${CYAN}最终磁盘占用:${NC}"
+    local _show=""
+    _show=$(du -sh /root/install.sh.bak* 2>/dev/null | tail -1) || _show=""
+    if [ -n "$_show" ]; then echo "  备份: $_show"; else echo "  备份: 无"; fi
+    if [ "$INIT_SYSTEM" == "openrc" ]; then
+        _show=$(du -sh /var/log 2>/dev/null) || _show=""
+        [ -n "$_show" ] && echo "  /var/log: $_show"
+    else
+        journalctl --disk-usage 2>/dev/null || true
+    fi
+
+    echo ""
+    echo -e "${GREEN}${BOLD}✓ 清理完成，按任意键返回主菜单${NC}"
+    return 0
+}
+
 # --- Management functions ---
 manage_singbox() {
     local action=$1
@@ -3053,28 +3227,29 @@ show_menu() {
     echo "  2. 节点信息与导入链接"
     echo "  3. 删除指定端口节点"
     echo ""
-    echo -e "${YELLOW}${BOLD}━━━ 服务控制 ━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}${BOLD}━━━ 服务与日志 ━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo "  4. 启动服务"
     echo "  5. 停止服务"
     echo "  6. 重启服务"
     echo "  7. 查看服务状态"
     echo "  8. 查看实时日志"
+    echo "  9. 清理备份与日志（磁盘瘦身）"
     echo ""
     echo -e "${CYAN}${BOLD}━━━ 配置管理 ━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo "  9. 编辑配置文件（校验 + 重启 + 重载节点，失败自动回滚）"
-    echo "  10. 中转管理（按端口绑定落地）"
-    echo "  11. 切换导入链接 IP（v4/v6/both）"
-    echo "  12. 切换出站 IP 模式（v4/v6/both）"
+    echo "  10. 编辑配置文件（校验 + 重启 + 重载节点，失败自动回滚）"
+    echo "  11. 中转管理（按端口绑定落地）"
+    echo "  12. 切换导入链接 IP（v4/v6/both）"
+    echo "  13. 切换出站 IP 模式（v4/v6/both）"
     echo ""
     echo -e "${MAGENTA}${BOLD}━━━ 系统维护 ━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo "  13. 更新 Sing-box 内核"
-    echo "  14. 卸载 Sing-box（单协议）"
-    echo "  15. 一键完全卸载"
+    echo "  14. 更新 Sing-box 内核"
+    echo "  15. 卸载 Sing-box（单协议）"
+    echo "  16. 一键完全卸载"
     echo ""
     echo "  0.  退出"
     echo -e "${MAGENTA}${BOLD}════════════════════════════════════════${NC}"
     local choice
-    read -rp "请输入选项 [0-15]: " choice
+    read -rp "请输入选项 [0-16]: " choice
 
     case "$choice" in
         1) install_node_menu ;;
@@ -3085,15 +3260,16 @@ show_menu() {
         6) manage_singbox "restart" ;;
         7) manage_singbox "status" ;;
         8) manage_singbox "log" ;;
-        9) manage_singbox "edit_config" ;;
-        10) relay_menu ;;
-        11) get_server_ips; choose_link_ip_mode; save_persistent_info ;;
-        12) io_mode_menu ;;
-        13) install_singbox_core "force" && manage_singbox "restart" ;;
-        14) uninstall_singbox ;;
-        15) uninstall_all ;;
+        9) cleanup_backups_and_logs ;;
+        10) manage_singbox "edit_config" ;;
+        11) relay_menu ;;
+        12) get_server_ips; choose_link_ip_mode; save_persistent_info ;;
+        13) io_mode_menu ;;
+        14) install_singbox_core "force" && manage_singbox "restart" ;;
+        15) uninstall_singbox ;;
+        16) uninstall_all ;;
         0) exit 0 ;;
-        *) error "无效选项，请输入 0 到 15 之间的数字。" ;;
+        *) error "无效选项，请输入 0 到 16 之间的数字。" ;;
     esac
     echo ""
 }
