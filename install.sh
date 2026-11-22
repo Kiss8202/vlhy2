@@ -567,9 +567,13 @@ find_and_set_singbox_cmd() {
 
 # --- IP detection: local-first, no external services ---
 get_server_ips() {
+    # 保留持久化值作为最后的兜底
+    local fallback_ip4="$LAST_SERVER_IP4"
+    local fallback_ip6="$LAST_SERVER_IP6"
     LAST_SERVER_IP4=""
     LAST_SERVER_IP6=""
 
+    # --- 第 1 层：本地网卡 ---
     if command -v ip &>/dev/null; then
         local v4_ips v6_ips
         v4_ips=$(ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 || true)
@@ -588,7 +592,7 @@ get_server_ips() {
 
     if [ -z "$LAST_SERVER_IP4" ] && [ -z "$LAST_SERVER_IP6" ]; then
         local host_ips
-        host_ips=$(hostname -I 2>/dev/null || ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr '\n' ' ' || true)
+        host_ips=$(hostname -I 2>/dev/null || true)
         if [ -n "$host_ips" ]; then
             for ip in $host_ips; do
                 if is_public_ipv4 "$ip" && [ -z "$LAST_SERVER_IP4" ]; then
@@ -600,26 +604,76 @@ get_server_ips() {
         fi
     fi
 
-    if [ -z "$LAST_SERVER_IP4" ] && [ -z "$LAST_SERVER_IP6" ]; then
-        warn "未自动获取到公网 IP。"
-        local manual_ip=""
-        while [ -z "$manual_ip" ]; do
-            read -rp "请输入服务器公网 IPv4（推荐）或 IPv6: " manual_ip
-            if is_public_ipv4 "$manual_ip"; then
-                LAST_SERVER_IP4="$manual_ip"
-            elif is_public_ipv6 "$manual_ip"; then
-                LAST_SERVER_IP6="$manual_ip"
-            else
-                error "输入的 IP 地址无效。"
-                manual_ip=""
+    if [ -n "$LAST_SERVER_IP4" ] || [ -n "$LAST_SERVER_IP6" ]; then
+        [ -n "$LAST_SERVER_IP4" ] && info "检测到公网 IPv4 (本地): $LAST_SERVER_IP4"
+        [ -n "$LAST_SERVER_IP6" ] && info "检测到公网 IPv6 (本地): $LAST_SERVER_IP6"
+        LAST_SERVER_IP="${LAST_SERVER_IP4:-$LAST_SERVER_IP6}"
+        return 0
+    fi
+
+    # --- 第 2 层：外部服务 ---
+    info "本地网卡未找到公网 IP（NAT / 私有网卡），尝试外部服务..."
+    if [ -z "$LAST_SERVER_IP4" ]; then
+        local svc _ip
+        for svc in "ifconfig.me" "api.ipify.org" "ip.sb"; do
+            _ip=$(curl -s4 --connect-timeout 3 --max-time 5 "https://${svc}" 2>/dev/null | tr -d '[:space:]' || true)
+            if is_public_ipv4 "$_ip"; then
+                LAST_SERVER_IP4="$_ip"
+                info "公网 IPv4 (${svc}): $LAST_SERVER_IP4"
+                break
+            fi
+        done
+    fi
+    if [ -z "$LAST_SERVER_IP6" ]; then
+        local svc6 _ip6
+        for svc6 in "ifconfig.me" "api6.ipify.org" "ip.sb"; do
+            _ip6=$(curl -s6 --connect-timeout 3 --max-time 5 "https://${svc6}" 2>/dev/null | tr -d '[:space:]' || true)
+            if is_public_ipv6 "$_ip6"; then
+                LAST_SERVER_IP6="$_ip6"
+                info "公网 IPv6 (${svc6}): $LAST_SERVER_IP6"
+                break
             fi
         done
     fi
 
-    [ -n "$LAST_SERVER_IP4" ] && info "检测到公网 IPv4: $LAST_SERVER_IP4"
-    [ -n "$LAST_SERVER_IP6" ] && info "检测到公网 IPv6: $LAST_SERVER_IP6"
+    # --- 第 3 层：持久化缓存兜底 ---
+    if [ -z "$LAST_SERVER_IP4" ] && [ -n "$fallback_ip4" ] && is_public_ipv4 "$fallback_ip4"; then
+        LAST_SERVER_IP4="$fallback_ip4"
+        warn "外部服务不可达，使用上次保存的 IPv4: $LAST_SERVER_IP4"
+    fi
+    if [ -z "$LAST_SERVER_IP6" ] && [ -n "$fallback_ip6" ] && is_public_ipv6 "$fallback_ip6"; then
+        LAST_SERVER_IP6="$fallback_ip6"
+        warn "外部服务不可达，使用上次保存的 IPv6: $LAST_SERVER_IP6"
+    fi
+
+    if [ -n "$LAST_SERVER_IP4" ] || [ -n "$LAST_SERVER_IP6" ]; then
+        LAST_SERVER_IP="${LAST_SERVER_IP4:-$LAST_SERVER_IP6}"
+        return 0
+    fi
+
+    # --- 第 4 层：手动输入 ---
+    warn "所有自动检测方式均失败，请手动输入公网 IP。"
+    info "提示: 如果你的 VPS 是 NAT 模式，公网 IP 需从服务商控制面板查看。"
+    local manual_ip=""
+    while [ -z "$manual_ip" ]; do
+        read -rp "请输入服务器公网 IPv4（推荐）或 IPv6（输入 q 取消）: " manual_ip
+        if [ "$manual_ip" == "q" ]; then
+            error "已取消"
+            return 1
+        fi
+        if is_public_ipv4 "$manual_ip"; then
+            LAST_SERVER_IP4="$manual_ip"
+        elif is_public_ipv6 "$manual_ip"; then
+            LAST_SERVER_IP6="$manual_ip"
+        else
+            error "输入的 IP 地址无效（不能是私有/保留地址）"
+            manual_ip=""
+        fi
+    done
 
     LAST_SERVER_IP="${LAST_SERVER_IP4:-$LAST_SERVER_IP6}"
+    save_ip_config 2>/dev/null || true
+    return 0
 }
 
 choose_link_ip_mode() {
