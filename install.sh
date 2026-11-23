@@ -567,7 +567,6 @@ find_and_set_singbox_cmd() {
 
 # --- IP detection: local-first, no external services ---
 get_server_ips() {
-    # 保留持久化值作为最后的兜底
     local fallback_ip4="$LAST_SERVER_IP4"
     local fallback_ip6="$LAST_SERVER_IP6"
     LAST_SERVER_IP4=""
@@ -590,53 +589,48 @@ get_server_ips() {
         done
     fi
 
-    if [ -z "$LAST_SERVER_IP4" ] && [ -z "$LAST_SERVER_IP6" ]; then
+    # --- 第 1.5 层：hostname -I ---
+    if [ -z "$LAST_SERVER_IP4" ] || [ -z "$LAST_SERVER_IP6" ]; then
         local host_ips
         host_ips=$(hostname -I 2>/dev/null || true)
         if [ -n "$host_ips" ]; then
             for ip in $host_ips; do
-                if is_public_ipv4 "$ip" && [ -z "$LAST_SERVER_IP4" ]; then
+                if [ -z "$LAST_SERVER_IP4" ] && is_public_ipv4 "$ip"; then
                     LAST_SERVER_IP4="$ip"
-                elif is_public_ipv6 "$ip" && [ -z "$LAST_SERVER_IP6" ]; then
+                elif [ -z "$LAST_SERVER_IP6" ] && is_public_ipv6 "$ip"; then
                     LAST_SERVER_IP6="$ip"
                 fi
             done
         fi
     fi
 
-    if [ -n "$LAST_SERVER_IP4" ] || [ -n "$LAST_SERVER_IP6" ]; then
-        [ -n "$LAST_SERVER_IP4" ] && info "检测到公网 IPv4 (本地): $LAST_SERVER_IP4"
-        [ -n "$LAST_SERVER_IP6" ] && info "检测到公网 IPv6 (本地): $LAST_SERVER_IP6"
-        LAST_SERVER_IP="${LAST_SERVER_IP4:-$LAST_SERVER_IP6}"
-        return 0
-    fi
-
-    # --- 第 2 层：外部服务 ---
-    info "本地网卡未找到公网 IP（NAT / 私有网卡），尝试外部服务..."
+    # --- 第 2 层：外部服务（v4/v6 独立，谁缺失就查谁）---
     if [ -z "$LAST_SERVER_IP4" ]; then
-        local svc _ip
-        for svc in "ifconfig.me" "api.ipify.org" "ip.sb"; do
-            _ip=$(curl -s4 --connect-timeout 3 --max-time 5 "https://${svc}" 2>/dev/null | tr -d '[:space:]' || true)
-            if is_public_ipv4 "$_ip"; then
-                LAST_SERVER_IP4="$_ip"
-                info "公网 IPv4 (${svc}): $LAST_SERVER_IP4"
+        info "本地未检测到公网 IPv4（NAT/私有网卡），通过外部服务获取..."
+        local _svc4 _ip4
+        for _svc4 in "ifconfig.me" "api.ipify.org" "ip.sb" "ipv4.icanhazip.com"; do
+            _ip4=$(curl -s4 --connect-timeout 3 --max-time 5 "https://${_svc4}" 2>/dev/null | tr -d '[:space:]' || true)
+            if is_public_ipv4 "$_ip4"; then
+                LAST_SERVER_IP4="$_ip4"
+                info "公网 IPv4 (${_svc4}): $LAST_SERVER_IP4"
                 break
             fi
         done
     fi
     if [ -z "$LAST_SERVER_IP6" ]; then
-        local svc6 _ip6
-        for svc6 in "ifconfig.me" "api6.ipify.org" "ip.sb"; do
-            _ip6=$(curl -s6 --connect-timeout 3 --max-time 5 "https://${svc6}" 2>/dev/null | tr -d '[:space:]' || true)
+        info "本地未检测到公网 IPv6，通过外部服务获取..."
+        local _svc6 _ip6
+        for _svc6 in "ifconfig.me" "api6.ipify.org" "ip.sb" "ipv6.icanhazip.com"; do
+            _ip6=$(curl -s6 --connect-timeout 3 --max-time 5 "https://${_svc6}" 2>/dev/null | tr -d '[:space:]' || true)
             if is_public_ipv6 "$_ip6"; then
                 LAST_SERVER_IP6="$_ip6"
-                info "公网 IPv6 (${svc6}): $LAST_SERVER_IP6"
+                info "公网 IPv6 (${_svc6}): $LAST_SERVER_IP6"
                 break
             fi
         done
     fi
 
-    # --- 第 3 层：持久化缓存兜底 ---
+    # --- 第 3 层：持久化兜底 ---
     if [ -z "$LAST_SERVER_IP4" ] && [ -n "$fallback_ip4" ] && is_public_ipv4 "$fallback_ip4"; then
         LAST_SERVER_IP4="$fallback_ip4"
         warn "外部服务不可达，使用上次保存的 IPv4: $LAST_SERVER_IP4"
@@ -646,17 +640,26 @@ get_server_ips() {
         warn "外部服务不可达，使用上次保存的 IPv6: $LAST_SERVER_IP6"
     fi
 
+    # --- 结果汇总 ---
+    if [ -n "$LAST_SERVER_IP4" ] && [ -n "$LAST_SERVER_IP6" ]; then
+        info "检测完成: v4=$LAST_SERVER_IP4  v6=$LAST_SERVER_IP6"
+    elif [ -n "$LAST_SERVER_IP4" ]; then
+        info "检测完成: v4=$LAST_SERVER_IP4（无公网 v6）"
+    elif [ -n "$LAST_SERVER_IP6" ]; then
+        info "检测完成: v6=$LAST_SERVER_IP6（v4 为 NAT 或不可达）"
+    fi
+
     if [ -n "$LAST_SERVER_IP4" ] || [ -n "$LAST_SERVER_IP6" ]; then
         LAST_SERVER_IP="${LAST_SERVER_IP4:-$LAST_SERVER_IP6}"
         return 0
     fi
 
     # --- 第 4 层：手动输入 ---
-    warn "所有自动检测方式均失败，请手动输入公网 IP。"
-    info "提示: 如果你的 VPS 是 NAT 模式，公网 IP 需从服务商控制面板查看。"
+    warn "所有自动检测均失败。"
+    info "NAT VPS 的公网 IP 请从服务商控制面板查看。"
     local manual_ip=""
     while [ -z "$manual_ip" ]; do
-        read -rp "请输入服务器公网 IPv4（推荐）或 IPv6（输入 q 取消）: " manual_ip
+        read -rp "请输入公网 IPv4 或 IPv6（输入 q 取消）: " manual_ip
         if [ "$manual_ip" == "q" ]; then
             error "已取消"
             return 1
@@ -666,13 +669,12 @@ get_server_ips() {
         elif is_public_ipv6 "$manual_ip"; then
             LAST_SERVER_IP6="$manual_ip"
         else
-            error "输入的 IP 地址无效（不能是私有/保留地址）"
+            error "IP 地址无效（不能是私有/保留地址）"
             manual_ip=""
         fi
     done
 
     LAST_SERVER_IP="${LAST_SERVER_IP4:-$LAST_SERVER_IP6}"
-    save_ip_config 2>/dev/null || true
     return 0
 }
 
@@ -2778,6 +2780,10 @@ io_mode_menu() {
         echo "================================================"
         echo "  当前出站: $(_io_mode_label "$OUTBOUND_MODE")"
         echo "  服务器 IP: v4=${LAST_SERVER_IP4:-无}  v6=${LAST_SERVER_IP6:-无}"
+        if [ -z "${LAST_SERVER_IP4:-}" ]; then
+            echo -e "${YELLOW}  提示: v4 未检测到（NAT 场景），但选「仅 IPv4 出站」仍生效，${NC}"
+            echo -e "${YELLOW}        sing-box 会通过出站路由自动走 v4，不依赖脚本记录的 IP${NC}"
+        fi
         echo ""
         echo "  说明: 入站固定双栈（listen ::），客户端按需选择 v4 或 v6 链接。"
         echo "        这里只控制 VPS 访问外网时使用的 IP 版本。"
