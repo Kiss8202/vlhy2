@@ -1456,7 +1456,7 @@ install_vless_tls() {
     echo "  提示: 从上述端口选，客户端改 address/port 即可走 CDN；也可选任意端口仅直连"
     echo ""
     local port
-    prompt_port "请输入 VLESS+TLS 监听端口" "8444" port tcp
+    prompt_port "请输入 VLESS+TLS 监听端口" "443" port tcp
 
     local sni
     prompt_domain "请输入 SNI / 证书 CN" "$DEFAULT_REALITY_SNI" sni
