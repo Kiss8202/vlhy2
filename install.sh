@@ -2884,8 +2884,8 @@ reload_nodes_from_config() {
         [ -z "$port" ] && continue
         case "$tag" in
             hy2-in-*)
-                _v=$(jq -r ".inbounds[$i].users[0].password // empty" "$SINGBOX_CONFIG_FILE")
-                NODE_HY2_PASSWORD["$port"]="$_v"
+                _v=$(jq -r ".inbounds[$i].users | if type == \"array\" and length > 0 then (.[0].password // empty) else empty end" "$SINGBOX_CONFIG_FILE")
+                [ -n "$_v" ] && NODE_HY2_PASSWORD["$port"]="$_v"
                 _v=$(jq -r ".inbounds[$i].tls.server_name // empty" "$SINGBOX_CONFIG_FILE")
                 NODE_HY2_SNI["$port"]="$_v"
                 _v=$(jq -r ".inbounds[$i].obfs.password // empty" "$SINGBOX_CONFIG_FILE")
@@ -2896,8 +2896,8 @@ reload_nodes_from_config() {
                 NODE_REALITY_UUID["$port"]="$_v"
                 _v=$(jq -r ".inbounds[$i].tls.server_name // empty" "$SINGBOX_CONFIG_FILE")
                 NODE_REALITY_SNI["$port"]="$_v"
-                _v=$(jq -r ".inbounds[$i].tls.reality.short_id[0] // empty" "$SINGBOX_CONFIG_FILE")
-                NODE_REALITY_SHORT_ID["$port"]="$_v"
+                _v=$(jq -r ".inbounds[$i].tls.reality.short_id | if type == \"array\" then (.[0] // empty) elif type == \"string\" then . else empty end" "$SINGBOX_CONFIG_FILE")
+                [ -n "$_v" ] && NODE_REALITY_SHORT_ID["$port"]="$_v"
                 if [ -z "${NODE_REALITY_PUBLIC_KEY[$port]:-}" ]; then
                     warn "Reality 端口 $port 缺少 public_key，导入链接会不完整"
                 fi
