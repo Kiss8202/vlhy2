@@ -1384,7 +1384,6 @@ install_hysteria2_reality() {
 
     create_systemd_service
     start_singbox_service || return 1
-    install_script_shortcut || true
 
     success "Hysteria2 + Reality 安装配置完成！"
     display_and_store_config_info "all"
@@ -1418,7 +1417,6 @@ install_hysteria2_only() {
 
     create_systemd_service
     start_singbox_service || return 1
-    install_script_shortcut || true
 
     success "Hysteria2 安装配置完成！"
     display_and_store_config_info "hysteria2"
@@ -1449,7 +1447,6 @@ install_reality_only() {
 
     create_systemd_service
     start_singbox_service || return 1
-    install_script_shortcut || true
 
     success "Reality (VLESS) 安装配置完成！"
     display_and_store_config_info "reality"
@@ -1534,7 +1531,6 @@ install_vless_tls() {
 
     create_systemd_service
     start_singbox_service || return 1
-    install_script_shortcut || true
 
     success "VLESS + TLS ($transport) 安装配置完成！"
     echo ""
@@ -1586,7 +1582,6 @@ install_socks5() {
 
     create_systemd_service
     start_singbox_service || return 1
-    install_script_shortcut || true
 
     success "SOCKS5 落地节点安装配置完成！"
     echo ""
