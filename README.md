@@ -32,3 +32,4 @@ wget -O /root/install.sh https://raw.githubusercontent.com/kiss8202/vlhy2/main/i
 
 
 
+.
